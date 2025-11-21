@@ -488,6 +488,7 @@ function detectBankCodeFromText_(s) {
 // Match full number first, then 6-digit tail, then 4-digit tail.
 function detectReceiverAccountFromText_(text) {
   const digits = onlyDigits_(text);
+  const raw    = String(text || '');
   if (!digits) return null;
 
   let bestKey = null;
@@ -503,7 +504,13 @@ function detectReceiverAccountFromText_(text) {
     if (digits.indexOf(tail6) >= 0 && bestScore < 2) {
       bestScore = 2; bestKey = acc; return;
     }
-    if (digits.indexOf(tail4) >= 0 && bestScore < 1) {
+    if (digits.indexOf(tail4) >= 0 && bestScore < 1.2) {
+      bestScore = 1.2; bestKey = acc; return;
+    }
+    // new: match masked accounts that still reveal 4 digits (allow x/digits between)
+    const seqPattern = tail4.split('').map(ch => ch + '[\\dxX]*').join('');
+    const re = new RegExp(seqPattern, 'i');
+    if (re.test(raw) && bestScore < 1) {
       bestScore = 1; bestKey = acc; return;
     }
   });
