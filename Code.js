@@ -120,6 +120,21 @@ const TEMP_SLIP_FOLDER_ID = PROPS.getProperty('TEMP_SLIP_FOLDER_ID');
 const GCV_API_KEY      = PROPS.getProperty('GCV_API_KEY'); // Vision
 const SHEET_ID         = PROPS.getProperty('SHEET_ID');    // Sheet with Rooms mapping
 
+// เลขบัญชีธนาคารหอพัก (digits only, no dashes)
+const RECEIVER_ACCOUNTS = {
+  // KBank – ชั้น 1
+  '0911848961':  { code: 'KKK+', bank: 'KBank', label: 'KBank ชั้น 1' },
+
+  // KBank – ชั้น 2  (บัญชี 214-3-83688-9 → MAK+)
+  '2143836889':  { code: 'MAK+', bank: 'KBank', label: 'KBank ชั้น 2 (MAK+)' },
+
+  // Krungsri – ชั้น 3
+  '5111482754':  { code: 'KGSI', bank: 'BAY',   label: 'Krungsri ชั้น 3' },
+
+  // GSB – ชั้น 4–5
+  '050711087200': { code: 'GSB5', bank: 'GSB',  label: 'GSB ชั้น 4–5' }
+};
+
 /***** ENTRYPOINT *****/
 function doPost(e){
   const headers = e?.headers || {};
@@ -388,7 +403,7 @@ function onImage_(ev){
       }catch(e){}
       return push_(userId, [{ type:'text', text:'✅ รับสลิปแล้ว ยืนยันการชำระเรียบร้อย ขอบคุณค่ะ' }]);
     }
-    if (result.reason === 'no_open_bill' || result.reason === 'amount_mismatch' || result.reason === 'ocr_missing' || result.reason === 'ambiguous'){
+    if (result.reason === 'no_open_bill' || result.reason === 'amount_mismatch' || result.reason === 'ocr_missing' || result.reason === 'ambiguous' || result.reason === 'no_ocr_data'){
       try{
         // เลือกปีจาก flow.ym ถ้ามี; ถ้าไม่มี ให้เดาจากเวลาปัจจุบัน
         var ymForPending = (flow.ym || Utilities.formatDate(new Date(),'Asia/Bangkok','yyyy-MM'));
@@ -450,6 +465,51 @@ function fetchLineBlob_(messageId){
   return res.getBlob();
 }
 
+function onlyDigits_(s) {
+  return String(s || '').replace(/\D/g, '');
+}
+
+// Detect bank code from a piece of text (generic)
+function detectBankCodeFromText_(s) {
+  if (/กสิกร|Kasikorn|KBank/i.test(s))           return 'KBank';
+  if (/กรุงเทพ|Bangkok Bank|BBL/i.test(s))      return 'BBL';
+  if (/กรุงศรี|Krungsri|BAY/i.test(s))          return 'BAY';
+  if (/กรุงไทย|Krungthai|KTB/i.test(s))         return 'KTB';
+  if (/ไทยพาณิชย์|SCB/i.test(s))               return 'SCB';
+  if (/ออมสิน|GSB/i.test(s))                    return 'GSB';
+  if (/พร้อมเพย์|PromptPay/i.test(s))           return 'PromptPay';
+  return '';
+}
+
+// Detect which of our RECEIVER_ACCOUNTS appears in the text.
+// Match full number first, then 6-digit tail, then 4-digit tail.
+function detectReceiverAccountFromText_(text) {
+  const digits = onlyDigits_(text);
+  if (!digits) return null;
+
+  let bestKey = null;
+  let bestScore = 0;
+
+  Object.keys(RECEIVER_ACCOUNTS).forEach(acc => {
+    if (digits.indexOf(acc) >= 0) {
+      if (bestScore < 3) { bestScore = 3; bestKey = acc; }
+      return;
+    }
+    const tail6 = acc.slice(-6);
+    const tail4 = acc.slice(-4);
+    if (digits.indexOf(tail6) >= 0 && bestScore < 2) {
+      bestScore = 2; bestKey = acc; return;
+    }
+    if (digits.indexOf(tail4) >= 0 && bestScore < 1) {
+      bestScore = 1; bestKey = acc; return;
+    }
+  });
+
+  if (!bestKey) return null;
+  const meta = RECEIVER_ACCOUNTS[bestKey];
+  return Object.assign({ accountNumber: bestKey }, meta);
+}
+
 /***** OCR + PARSE *****/
 function ocrSlipFromFileId_PR_(fileId){
   if (!GCV_API_KEY) throw new Error('Missing GCV_API_KEY');
@@ -490,6 +550,32 @@ function parseThaiSlip_PR_(raw){
 
   // split to lines for line-based proximity
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+  // NEW: try to identify sender/receiver bank + receiver account
+  let fromBank = '';
+  let toBank   = '';
+  let receiver = null; // { accountNumber, code, bank, label }
+
+  for (let i = 0; i < lines.length; i++) {
+    const ln   = lines[i];
+    const next = lines[i+1] || '';
+
+    if (!fromBank && /(จากบัญชี|ผู้โอน|จาก บัญชี|from account|from)/i.test(ln)) {
+      fromBank = detectBankCodeFromText_(ln + ' ' + next) || fromBank;
+    }
+
+    if (!toBank && /(เข้าบัญชี|ผู้รับเงิน|ปลายทาง|ไปยังบัญชี|to account|to)/i.test(ln)) {
+      const combined = ln + ' ' + next;
+      toBank = detectBankCodeFromText_(combined) || toBank;
+      if (!receiver) receiver = detectReceiverAccountFromText_(combined);
+    }
+  }
+
+  if (!fromBank || !toBank) {
+    const generic = detectBankCodeFromText_(text);
+    if (!fromBank) fromBank = generic;
+    if (!toBank)   toBank   = generic;
+  }
 
   // helper: is a line a "fee/commission" line?
   const isFeeLine = (s) => NEG.test(s);
@@ -575,14 +661,22 @@ function parseThaiSlip_PR_(raw){
       if (mm) { txId = (mm[2] || mm[0]).replace(/^(หมายเลขอ้างอิง|เลขที่อ้างอิง|reference|ref\.?|transaction id|trace id)\s*[:\-]?\s*/i,'').trim(); break; }
     }
 
-    if (/ไทยพาณิชย์|SCB/i.test(fullText)) bank='SCB';
-    else if (/กสิกร|KBank/i.test(fullText)) bank='KBank';
-    else if (/กรุงไทย|Krungthai|KTB/i.test(fullText)) bank='KTB';
-    else if (/กรุงเทพ|Bangkok Bank|BBL/i.test(fullText)) bank='BBL';
-    else if (/กรุงศรี|Krungsri|BAY/i.test(fullText)) bank='BAY';
-    else if (/พร้อมเพย์|PromptPay/i.test(fullText)) bank='PromptPay';
+    const mainBank = toBank || fromBank || detectBankCodeFromText_(fullText);
+    const recv = receiver || detectReceiverAccountFromText_(fullText);
 
-    return { rawText: fullText, amount: (amount!=null? Number(amount):null), txDate, txTime, txId, bank };
+    return {
+      rawText: fullText,
+      amount: (amount!=null ? Number(amount) : null),
+      txDate,
+      txTime,
+      txId,
+      bank: mainBank,
+      fromBank,
+      toBank,
+      receiverAccountNumber: recv ? recv.accountNumber : '',
+      receiverAccountCode:   recv ? recv.code          : '',
+      receiverBank:          recv ? recv.bank          : mainBank
+    };
   }
 }
 
@@ -689,7 +783,19 @@ function updateBillWithSlip_PR_({ rowIndex, slipId, markStatus }){
   if (cStatus>-1)sh.getRange(rowIndex, cStatus+1).setValue(markStatus||'Slip Received');
 }
 
-function updateInboxMatchResult_PR_({ rowIndex, status, matchedBillId, confidence, note, ocrAmount, billAmount, delta }){
+function updateInboxMatchResult_PR_({
+  rowIndex,
+  status,
+  matchedBillId,
+  confidence,
+  note,
+  ocrAmount,
+  billAmount,
+  delta,
+  ocrBank,
+  ocrAccountCode,
+  ocrAccountNo
+}){
   const sh  = openRevenueSheetByName_PR_('Payments_Inbox');
   const hdr = getHeaders_PR_(sh);
 
@@ -705,6 +811,9 @@ function updateInboxMatchResult_PR_({ rowIndex, status, matchedBillId, confidenc
   const cBA2 = idxOf_PR_(hdr,'billamount');
   const cDL  = idxOf_PR_(hdr,'amount_delta');
   const cDL2 = idxOf_PR_(hdr,'delta');
+  const cBk      = idxOf_PR_(hdr,'ocr_bank');
+  const cAccCode = idxOf_PR_(hdr,'ocr_accountcode');
+  const cAccNo   = idxOf_PR_(hdr,'ocr_accountno');
 
   // compute delta if not provided
   let _delta = delta;
@@ -722,6 +831,10 @@ function updateInboxMatchResult_PR_({ rowIndex, status, matchedBillId, confidenc
   setNum(cOCR>-1? cOCR : cOCR2, ocrAmount);
   setNum(cBA >-1? cBA  : cBA2 , billAmount);
   setNum(cDL >-1? cDL  : cDL2 , _delta);
+
+  if (cBk>-1)      sh.getRange(rowIndex, cBk+1).setValue(ocrBank || '');
+  if (cAccCode>-1) sh.getRange(rowIndex, cAccCode+1).setValue(ocrAccountCode || '');
+  if (cAccNo>-1)   sh.getRange(rowIndex, cAccNo+1).setValue(ocrAccountNo || '');
 }
 
 
@@ -769,23 +882,24 @@ function tryMatchAndConfirm_PR_(args){
         matchedBillId: '',
         confidence: '',
         note: `OCR: amount=${ocr?.amount ?? ''}, date=${ocr?.txDate? Utilities.formatDate(ocr.txDate,'Asia/Bangkok','yyyy-MM-dd') : ''}, bank=${ocr?.bank ?? ''}, ref=${ocr?.txId ?? ''}`,
-        ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null
+        ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
+        ocrBank: ocr ? (ocr.receiverBank || ocr.bank || '') : '',
+        ocrAccountCode: ocr ? (ocr.receiverAccountCode || '') : '',
+        ocrAccountNo:   ocr ? (ocr.receiverAccountNumber || '') : ''
       });
 
     }catch(e){
+      console.error('OCR_FAILED', e);
       updateInboxMatchResult_PR_({
         rowIndex: inbox.rowIndex,
         status: 'ocr_missing',
         matchedBillId: '',
         confidence: 0.2,
-        note: 'no/failed OCR → manual review',
+        note: 'OCR failed – matching by selected month',
         ocrAmount: null
       });
-      enqueueReview_PR_({
-        room, declaredAmount: null, reason:'ocr_missing',
-        slipId: inbox.slipId, note:'blocked auto-match', lineUserId
-      });
-      return { ok:false, reason:'ocr_missing' };
+      ocr = null;
+      ocrOk = false;
     }
   } else {
     updateInboxMatchResult_PR_({
@@ -809,7 +923,10 @@ function tryMatchAndConfirm_PR_(args){
       matchedBillId: '',
       confidence: 0.0,
       note: ocrOk ? 'no_open_bill (have OCR)' : 'no_open_bill (no/failed OCR)',
-      ocrAmount: declaredAmount
+      ocrAmount: declaredAmount,
+      ocrBank: ocr ? (ocr.receiverBank || ocr.bank || '') : '',
+      ocrAccountCode: ocr ? (ocr.receiverAccountCode || '') : '',
+      ocrAccountNo:   ocr ? (ocr.receiverAccountNumber || '') : ''
     });
     enqueueReview_PR_({
       room, declaredAmount, reason:'no_open_bill',
@@ -825,7 +942,10 @@ function tryMatchAndConfirm_PR_(args){
       matchedBillId: '',
       confidence: 0.3,
       note: 'multiple candidates' + (ocrOk?' (have OCR)':' (no/failed OCR)'),
-      ocrAmount: declaredAmount
+      ocrAmount: declaredAmount,
+      ocrBank: ocr ? (ocr.receiverBank || ocr.bank || '') : '',
+      ocrAccountCode: ocr ? (ocr.receiverAccountCode || '') : '',
+      ocrAccountNo:   ocr ? (ocr.receiverAccountNumber || '') : ''
     });
     enqueueReview_PR_({
       room, declaredAmount, reason:'ambiguous_candidates',
@@ -851,7 +971,10 @@ function tryMatchAndConfirm_PR_(args){
         confidence: 0.4,
         note: `OCR amount=${ocr.amount}; bill=${billAmt}; Δ=${delta}`,
         ocrAmount: Number(ocr.amount),
-        billAmount: billAmt
+        billAmount: billAmt,
+        ocrBank: ocr ? (ocr.receiverBank || ocr.bank || '') : '',
+        ocrAccountCode: ocr ? (ocr.receiverAccountCode || '') : '',
+        ocrAccountNo:   ocr ? (ocr.receiverAccountNumber || '') : ''
       });
       enqueueReview_PR_({
         room, billId:cand.billId,
@@ -876,20 +999,31 @@ function tryMatchAndConfirm_PR_(args){
   }
 
   // Guard: still no usable OCR at all → send to manual review
-  if (!ocrOk) {
+  const hasOcrAmount = (ocrOk && ocr && ocr.amount != null);
+  if (!hasOcrAmount){
     updateInboxMatchResult_PR_({
       rowIndex: inbox.rowIndex,
-      status: 'ocr_missing',
-      matchedBillId: '',
-      confidence: 0.2,
-      note: 'no/failed OCR → manual review',
-      ocrAmount: null
+      status: 'no_ocr_data',
+      matchedBillId: cand.billId || '',
+      confidence: 0.35,
+      note: 'Missing OCR amount → manual review',
+      ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
+      billAmount: billAmt,
+      ocrBank: ocr ? (ocr.receiverBank || ocr.bank || '') : '',
+      ocrAccountCode: ocr ? (ocr.receiverAccountCode || '') : '',
+      ocrAccountNo:   ocr ? (ocr.receiverAccountNumber || '') : ''
     });
     enqueueReview_PR_({
-      room, declaredAmount: null, reason:'ocr_missing',
-      slipId: inbox.slipId, note:'blocked auto-match', lineUserId
+      room,
+      billId: cand.billId,
+      declaredAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
+      amountDue: billAmt,
+      reason: 'no_ocr_data',
+      slipId: inbox.slipId,
+      note: 'auto-queued (no OCR data)',
+      lineUserId
     });
-    return { ok:false, reason:'ocr_missing' };
+    return { ok:false, reason:'no_ocr_data' };
   }
 
   // 5) Success path — mark bill, write amounts & delta
@@ -897,14 +1031,21 @@ function tryMatchAndConfirm_PR_(args){
     rowIndex: cand.rowIndex, slipId: inbox.slipId, markStatus:'Slip Received'
   });
 
+  const matchNote = ocrOk
+    ? `OCR OK; bank=${ocr.bank||''}; ref=${ocr.txId||''}`
+    : 'Matched using selected month (no OCR data)';
+
   updateInboxMatchResult_PR_({
     rowIndex: inbox.rowIndex,
     status:'matched',
     matchedBillId: cand.billId,
     confidence: conf,
-    note: `OCR OK; bank=${ocr.bank||''}; ref=${ocr.txId||''}`,
+    note: matchNote,
     ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
-    billAmount: billAmt
+    billAmount: billAmt,
+    ocrBank: ocr ? (ocr.receiverBank || ocr.bank || '') : '',
+    ocrAccountCode: ocr ? (ocr.receiverAccountCode || '') : '',
+    ocrAccountNo:   ocr ? (ocr.receiverAccountNumber || '') : ''
     // Amount_Delta will be computed in the updater if both provided
   });
 
@@ -1012,4 +1153,3 @@ function getOrCreatePendingFolder_(rootFolderId, ym){
   const yearId = ensureFolder_(rootFolderId, year);
   return ensureFolder_(yearId, '00_Pending');
 }
-
