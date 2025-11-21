@@ -897,7 +897,7 @@ function tryMatchAndConfirm_PR_(args){
   // 2) OCR
   let ocr = null, ocrOk = false;
   const ocrMeta = () => {
-    if (!ocr) return { bank:'', code:'', acc:'' };
+    if (!ocr) return { bank:'UNKNOWN', code:'NON_MATCH', acc:'NON_MATCH' };
     const bank = ocr.receiverBank || ocr.bank || 'UNKNOWN';
     if (ocr.receiverAccountNumber) {
       return {
@@ -936,7 +936,7 @@ function tryMatchAndConfirm_PR_(args){
         confidence: 0.2,
         note: 'OCR failed – matching by selected month',
         ocrAmount: null,
-        ocrBank: '',
+        ocrBank: 'UNKNOWN',
         ocrAccountCode: 'NON_MATCH',
         ocrAccountNo: 'NON_MATCH'
       });
@@ -951,7 +951,7 @@ function tryMatchAndConfirm_PR_(args){
       confidence:'',
       note:'No fileId → skip OCR',
       ocrAmount: null,
-      ocrBank: '',
+      ocrBank: 'UNKNOWN',
       ocrAccountCode: 'NON_MATCH',
       ocrAccountNo: 'NON_MATCH'
     });
@@ -970,8 +970,8 @@ function tryMatchAndConfirm_PR_(args){
       note: ocrOk ? 'no_open_bill (have OCR)' : 'no_open_bill (no/failed OCR)',
       ocrAmount: declaredAmount,
       ocrBank: ocrMeta().bank,
-      ocrAccountCode: ocr ? (ocrMeta().code || 'NON_MATCH') : 'NON_MATCH',
-      ocrAccountNo:   ocr ? (ocrMeta().acc  || 'NON_MATCH') : 'NON_MATCH'
+      ocrAccountCode: ocrMeta().code || 'NON_MATCH',
+      ocrAccountNo:   ocrMeta().acc  || 'NON_MATCH'
     });
     enqueueReview_PR_({
       room, declaredAmount, reason:'no_open_bill',
@@ -989,8 +989,8 @@ function tryMatchAndConfirm_PR_(args){
       note: 'multiple candidates' + (ocrOk?' (have OCR)':' (no/failed OCR)'),
       ocrAmount: declaredAmount,
       ocrBank: ocrMeta().bank,
-      ocrAccountCode: ocr ? (ocrMeta().code || 'NON_MATCH') : 'NON_MATCH',
-      ocrAccountNo:   ocr ? (ocrMeta().acc  || 'NON_MATCH') : 'NON_MATCH'
+      ocrAccountCode: ocrMeta().code || 'NON_MATCH',
+      ocrAccountNo:   ocrMeta().acc  || 'NON_MATCH'
     });
     enqueueReview_PR_({
       room, declaredAmount, reason:'ambiguous_candidates',
@@ -1057,8 +1057,8 @@ function tryMatchAndConfirm_PR_(args){
       ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
       billAmount: billAmt,
       ocrBank: ocrMeta().bank,
-      ocrAccountCode: ocr ? (ocrMeta().code || 'NON_MATCH') : 'NON_MATCH',
-      ocrAccountNo:   ocr ? (ocrMeta().acc  || 'NON_MATCH') : 'NON_MATCH'
+      ocrAccountCode: ocrMeta().code || 'NON_MATCH',
+      ocrAccountNo:   ocrMeta().acc  || 'NON_MATCH'
     });
     enqueueReview_PR_({
       room,
