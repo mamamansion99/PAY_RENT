@@ -777,13 +777,17 @@ function findCandidateBill_PR_({ room, declaredAmount, ym }) {
 
 
 
-function updateBillWithSlip_PR_({ rowIndex, slipId, markStatus }){
+function updateBillWithSlip_PR_({ rowIndex, slipId, markStatus, bankMatchStatus }){
   const sh  = openRevenueSheetByName_PR_('Horga_Bills');
   const hdr = getHeaders_PR_(sh);
-  const cStatus=idxOf_PR_(hdr,'status'), cPaidAt=idxOf_PR_(hdr,'paidat'), cSlip=idxOf_PR_(hdr,'slipid');
-  if (cSlip>-1)  sh.getRange(rowIndex, cSlip+1).setValue(slipId);
-  if (cPaidAt>-1)sh.getRange(rowIndex, cPaidAt+1).setValue(new Date());
-  if (cStatus>-1)sh.getRange(rowIndex, cStatus+1).setValue(markStatus||'Slip Received');
+  const cStatus    = idxOf_PR_(hdr,'status');
+  const cPaidAt    = idxOf_PR_(hdr,'paidat');
+  const cSlip      = idxOf_PR_(hdr,'slipid');
+  const cBankMatch = idxOf_PR_(hdr,'bankmatchstatus');
+  if (cSlip>-1)     sh.getRange(rowIndex, cSlip+1).setValue(slipId);
+  if (cPaidAt>-1)   sh.getRange(rowIndex, cPaidAt+1).setValue(new Date());
+  if (cStatus>-1)   sh.getRange(rowIndex, cStatus+1).setValue(markStatus||'Slip Received');
+  if (cBankMatch>-1 && bankMatchStatus) sh.getRange(rowIndex, cBankMatch+1).setValue(bankMatchStatus);
 }
 
 function updateInboxMatchResult_PR_({
@@ -859,6 +863,25 @@ function enqueueReview_PR_({ room, billId, declaredAmount, amountDue, reason, sl
 }
 
 /***** MATCH CORE (drop-in) *****/
+function getBillAccountByRow_PR_(rowIndex){
+  try{
+    const sh  = openRevenueSheetByName_PR_('Horga_Bills');
+    const hdr = getHeaders_PR_(sh);
+    const cAcc = idxOf_PR_(hdr, 'account');
+    if (cAcc < 0) return '';
+    return String(sh.getRange(rowIndex, cAcc+1).getValue() || '').trim().toUpperCase();
+  }catch(e){ return ''; }
+}
+
+function deriveBankMatchStatus_PR_(billAccountCode, ocrMetaObj){
+  const bill = String(billAccountCode || '').trim().toUpperCase();
+  const code = String((ocrMetaObj && ocrMetaObj.code) || '').trim().toUpperCase();
+  if (!bill) return '';
+  if (!code || code === 'NON_MATCH') return 'receiver_non_match';
+  if (bill === code) return 'receiver_matched';
+  return 'receiver_mismatch';
+}
+
 function tryMatchAndConfirm_PR_(args){
   const ym         = String(args.ym || '').trim();
   const room       = (args.room || '').toUpperCase().trim();
@@ -980,6 +1003,8 @@ function tryMatchAndConfirm_PR_(args){
   const cand    = found.candidate;
   const billAmt = Number(cand.amountDue);
   let conf      = 0.70;
+  const billAccountCode = getBillAccountByRow_PR_(cand.rowIndex);
+  const bankMatchStatus = deriveBankMatchStatus_PR_(billAccountCode, ocrMeta());
 
   // If OCR worked, compare amounts
   if (ocrOk && ocr.amount!=null){
@@ -1050,7 +1075,10 @@ function tryMatchAndConfirm_PR_(args){
 
   // 5) Success path — mark bill, write amounts & delta
   updateBillWithSlip_PR_({
-    rowIndex: cand.rowIndex, slipId: inbox.slipId, markStatus:'Slip Received'
+    rowIndex: cand.rowIndex,
+    slipId: inbox.slipId,
+    markStatus:'Slip Received',
+    bankMatchStatus
   });
 
   const matchNote = ocrOk
