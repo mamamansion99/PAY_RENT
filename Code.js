@@ -132,7 +132,10 @@ const RECEIVER_ACCOUNTS = {
   '5111482754':  { code: 'KGSI', bank: 'BAY',   label: 'Krungsri ชั้น 3' },
 
   // GSB – ชั้น 4–5
-  '050711087200': { code: 'GSB5', bank: 'GSB',  label: 'GSB ชั้น 4–5' }
+  '050711087200': { code: 'GSB5', bank: 'GSB',  label: 'GSB ชั้น 4–5' },
+
+  // Additional account mapping
+  '1818203205': { code: 'KBIZ', bank: 'KBIZ', label: 'KBIZ' }
 };
 
 /***** ENTRYPOINT *****/
