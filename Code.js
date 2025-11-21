@@ -880,12 +880,23 @@ function getBillAccountByRow_PR_(rowIndex){
   }catch(e){ return ''; }
 }
 
+function normalizeBankFromCodeOrBank_PR_(val){
+  const v = String(val || '').trim().toUpperCase();
+  if (!v) return '';
+  if (v.indexOf('GSB') !== -1) return 'GSB';
+  if (v.indexOf('KKB') !== -1 || v.indexOf('KKK') !== -1 || v.indexOf('KKBANK') !== -1) return 'KBANK';
+  if (v.indexOf('BAY') !== -1 || v.indexOf('KGSI') !== -1) return 'BAY';
+  if (v.indexOf('TMK') !== -1 || v.indexOf('MAK') !== -1) return 'KBANK';
+  if (v.indexOf('KBIZ') !== -1) return 'KBIZ';
+  return v;
+}
+
 function deriveBankMatchStatus_PR_(billAccountCode, ocrMetaObj){
-  const bill = String(billAccountCode || '').trim().toUpperCase();
-  const code = String((ocrMetaObj && ocrMetaObj.code) || '').trim().toUpperCase();
-  if (!bill) return '';
-  if (!code || code === 'NON_MATCH') return 'receiver_non_match';
-  if (bill === code) return 'receiver_matched';
+  const billBank = normalizeBankFromCodeOrBank_PR_(billAccountCode);
+  const ocrBank  = normalizeBankFromCodeOrBank_PR_(ocrMetaObj?.bank || ocrMetaObj?.code);
+  if (!billBank) return '';
+  if (!ocrBank || ocrBank === 'NON_MATCH') return 'receiver_non_match';
+  if (billBank === ocrBank) return 'receiver_matched';
   return 'receiver_mismatch';
 }
 
