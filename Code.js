@@ -898,7 +898,7 @@ function tryMatchAndConfirm_PR_(args){
   let ocr = null, ocrOk = false;
   const ocrMeta = () => {
     if (!ocr) return { bank:'', code:'', acc:'' };
-    const bank = ocr.receiverBank || ocr.bank || '';
+    const bank = ocr.receiverBank || ocr.bank || 'UNKNOWN';
     if (ocr.receiverAccountNumber) {
       return {
         bank,
