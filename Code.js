@@ -226,7 +226,7 @@ function formatMonthLabel_(d, mode){
   return TH_FULL_MONTHS[m];
 }
 
-// คืนค่า YM สำหรับรอบบิลปัจจุบัน (จ่ายล่วงหน้าเดือนถัดไปตั้งแต่วันที่ 25 เป็นต้นไป)
+// คืนค่า YM สำหรับรอบบิลปัจจุบัน (จ่ายล่วงหน้าเดือนถัดไปตั้งแต่วันที่ 24 เป็นต้นไป)
 function getBillingYmForNow_(){
   const now = new Date();
   const tz  = 'Asia/Bangkok';
@@ -236,7 +236,7 @@ function getBillingYmForNow_(){
 
   let targetY = y;
   let targetM = m;
-  if (d >= 25) {
+  if (d >= 24) {
     targetM += 1;
     if (targetM > 11) { targetM = 0; targetY += 1; }
   }
