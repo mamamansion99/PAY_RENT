@@ -181,10 +181,16 @@ function onText_(ev){
 
   // Entry point
   if (/^(ชำระค่าเช่า|จ่ายค่าเช่า|pay\s*rent|ค่าเช่า)$/i.test(text)) {
-    // เริ่ม flow เลือกเดือน
-    setRentStep_(userId, 'await_month', {});
-    // แสดงตัวเลือกเดือน (ไม่ใส่ปุ่มอื่น เพื่อลดความซ้ำ)
-    return push_(userId, [ buildMonthPickerFlex_() ]);
+    const ym = getBillingYmForNow_();
+    const monthLabel = formatRentMonthTh_(ym);
+    const room = findRoomByLineId_PR_(userId);
+
+    if (room) {
+      setRentStep_(userId, 'await_slip', { ym, room });
+      return push_(userId, [{ type:'text', text:`เดือน: ${monthLabel}\nห้อง: ${room}\nส่งสลิปได้เลยค่ะ` }]);
+    }
+    setRentStep_(userId, 'await_room', { ym });
+    return push_(userId, [{ type:'text', text:`เดือน: ${monthLabel}\nพิมพ์เบอร์ห้อง (เช่น A101)` }]);
   }
 
   // ถามห้องในกรณีที่ยังไม่มี mapping
@@ -218,6 +224,38 @@ function formatMonthLabel_(d, mode){
   const m = d.getMonth();
   if (mode === 'numeric') return String(m+1).padStart(2,'0') + '/' + y;
   return TH_FULL_MONTHS[m];
+}
+
+// คืนค่า YM สำหรับรอบบิลปัจจุบัน (จ่ายล่วงหน้าเดือนถัดไปตั้งแต่วันที่ 25 เป็นต้นไป)
+function getBillingYmForNow_(){
+  const now = new Date();
+  const tz  = 'Asia/Bangkok';
+  const y   = Number(Utilities.formatDate(now, tz, 'yyyy'));
+  const m   = Number(Utilities.formatDate(now, tz, 'MM')) - 1; // 0-based
+  const d   = Number(Utilities.formatDate(now, tz, 'dd'));
+
+  let targetY = y;
+  let targetM = m;
+  if (d >= 25) {
+    targetM += 1;
+    if (targetM > 11) { targetM = 0; targetY += 1; }
+  }
+  return targetY + '-' + String(targetM + 1).padStart(2,'0'); // YYYY-MM
+}
+
+function ymToDate_(ym){
+  const [yStr, mStr] = String(ym || '').split('-');
+  const y = Number(yStr);
+  const m = Number(mStr) - 1;
+  if (!y || isNaN(m)) return new Date();
+  return new Date(y, Math.max(0, Math.min(11, m)), 1);
+}
+
+function formatRentMonthTh_(ym){
+  const d = ymToDate_(ym);
+  const yearText = Utilities.formatDate(d, 'Asia/Bangkok', 'yyyy');
+  const monthLabel = formatMonthLabel_(d, 'thai');
+  return `${monthLabel} ${yearText}`;
 }
 
 function buildMonthPickerFlex_(){
@@ -365,7 +403,7 @@ function onImage_(ev){
 
   const flow = getRentFlow_(userId);
   if (flow.step !== 'await_slip' || !flow.ym) {
-    return push_(userId, [{ type:'text', text:'กรุณาเริ่มที่ “จ่ายค่าเช่า” และ “เลือกเดือน” ก่อนนะคะ' }]);
+    return push_(userId, [{ type:'text', text:'กรุณาเริ่มที่ “จ่ายค่าเช่า” ก่อนนะคะ' }]);
   }
 
   startLoading_(userId, 5);
