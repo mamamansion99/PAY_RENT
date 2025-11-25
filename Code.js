@@ -119,6 +119,8 @@ const SLIP_FOLDER_ID   = PROPS.getProperty('SLIP_FOLDER_ID');
 const TEMP_SLIP_FOLDER_ID = PROPS.getProperty('TEMP_SLIP_FOLDER_ID');
 const GCV_API_KEY      = PROPS.getProperty('GCV_API_KEY'); // Vision
 const SHEET_ID         = PROPS.getProperty('SHEET_ID');    // Sheet with Rooms mapping
+const ADMIN_GROUP_ID   = PROPS.getProperty('ADMIN_GROUP_ID') || ''; // OA group to receive alerts
+const LINE_NOTIFY_TOKEN= PROPS.getProperty('LINE_NOTIFY_TOKEN') || '';
 
 // เลขบัญชีธนาคารหอพัก (digits only, no dashes)
 const RECEIVER_ACCOUNTS = {
@@ -478,6 +480,41 @@ function startLoading_(chatId, seconds){
       muteHttpExceptions:true
     });
   } catch(e){}
+}
+function sendLineNotify_PR_(message){
+  if (!LINE_NOTIFY_TOKEN) return;
+  try{
+    UrlFetchApp.fetch('https://notify-api.line.me/api/notify',{
+      method:'post',
+      headers:{ Authorization:'Bearer '+LINE_NOTIFY_TOKEN },
+      payload:{ message:String(message||'').slice(0,1200) },
+      muteHttpExceptions:true
+    });
+  }catch(e){ console.error('LINE_NOTIFY_FAIL', e); }
+}
+function adminNotify_PR_(text){
+  const msg = String(text||'').slice(0,1200);
+  let ok = false;
+  if (ADMIN_GROUP_ID){
+    try{ push_(ADMIN_GROUP_ID, [{ type:'text', text: msg }]); ok = true; }
+    catch(e){ console.error('ADMIN_PUSH_FAIL', e); }
+  }
+  if (!ok) sendLineNotify_PR_(msg);
+}
+function notifyGroupPaymentMatched_PR_({ room, amountDue, billId, ocrAmount, slipId, confidence, status }){
+  if (!ADMIN_GROUP_ID && !LINE_NOTIFY_TOKEN) return;
+  const title = status === 'matched_auto' ? '💵 รับสลิปค่าเช่า' : '⚠️ สลิปต้องตรวจสอบ';
+  const lines = [
+    room ? `ห้อง: ${room}` : '',
+    billId ? `บิล: ${billId}` : '',
+    amountDue!=null ? `ยอดบิล: ${Number(amountDue).toLocaleString()}` : '',
+    ocrAmount!=null ? `ยอดจากสลิป: ${Number(ocrAmount).toLocaleString()}` : '',
+    confidence!=null ? `ความมั่นใจ: ${Math.round(Number(confidence)*100)}%` : '',
+    slipId ? `SlipID: ${slipId}` : '',
+    status ? `สถานะ: ${status}` : ''
+  ].filter(Boolean).join('\n');
+  const msg = [title, lines].filter(Boolean).join('\n');
+  adminNotify_PR_(msg);
 }
 function parseKv_(q){
   const o={}; (q||'').split('&').forEach(p=>{
@@ -1033,6 +1070,13 @@ function tryMatchAndConfirm_PR_(args){
       room, declaredAmount, reason:'no_open_bill',
       slipId: inbox.slipId, note:'auto-queued', lineUserId
     });
+    adminNotify_PR_([
+      '⚠️ สลิปไม่มีบิลที่เปิดอยู่',
+      room ? `ห้อง: ${room}` : '',
+      declaredAmount!=null ? `OCR Amount: ${Number(declaredAmount).toLocaleString()}` : '',
+      ocrMeta().bank ? `ธนาคารจากสลิป: ${ocrMeta().bank}` : '',
+      inbox.slipId ? `SlipID: ${inbox.slipId}` : ''
+    ].filter(Boolean).join('\n'));
     return { ok:false, reason:'no_open_bill', slipId: inbox.slipId };
   }
 
@@ -1052,6 +1096,12 @@ function tryMatchAndConfirm_PR_(args){
       room, declaredAmount, reason:'ambiguous_candidates',
       slipId: inbox.slipId, lineUserId
     });
+    adminNotify_PR_([
+      '⚠️ สลิปเจอบิลหลายใบ (ambiguous)',
+      room ? `ห้อง: ${room}` : '',
+      declaredAmount!=null ? `OCR Amount: ${Number(declaredAmount).toLocaleString()}` : '',
+      inbox.slipId ? `SlipID: ${inbox.slipId}` : ''
+    ].filter(Boolean).join('\n'));
     return { ok:false, reason:'ambiguous' };
   }
 
@@ -1088,6 +1138,15 @@ function tryMatchAndConfirm_PR_(args){
         note:'blocked auto-match',
         lineUserId
       });
+      adminNotify_PR_([
+        '⚠️ ยอดสลิปไม่ตรงบิล',
+        room ? `ห้อง: ${room}` : '',
+        `บิล: ${cand.billId}`,
+        `ยอดบิล: ${billAmt.toLocaleString()}`,
+        `ยอดสลิป: ${Number(ocr.amount).toLocaleString()}`,
+        `ต่างกัน: ${delta.toLocaleString()}`,
+        inbox.slipId ? `SlipID: ${inbox.slipId}` : ''
+      ].filter(Boolean).join('\n'));
       return { ok:false, reason:'amount_mismatch' };
     }
 
@@ -1126,6 +1185,13 @@ function tryMatchAndConfirm_PR_(args){
       note: 'auto-queued (no OCR data)',
       lineUserId
     });
+    adminNotify_PR_([
+      '⚠️ สลิปไม่มี OCR amount',
+      room ? `ห้อง: ${room}` : '',
+      `บิล: ${cand.billId}`,
+      `ยอดบิล: ${billAmt.toLocaleString()}`,
+      inbox.slipId ? `SlipID: ${inbox.slipId}` : ''
+    ].filter(Boolean).join('\n'));
     return { ok:false, reason:'no_ocr_data' };
   }
 
@@ -1153,6 +1219,15 @@ function tryMatchAndConfirm_PR_(args){
     ocrAccountCode: ocrMeta().code,
     ocrAccountNo:   ocrMeta().acc
     // Amount_Delta will be computed in the updater if both provided
+  });
+  notifyGroupPaymentMatched_PR_({
+    room,
+    amountDue: cand.amountDue,
+    billId: cand.billId,
+    ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
+    slipId: inbox.slipId,
+    confidence: conf,
+    status: 'matched_auto'
   });
 
   return {
