@@ -607,6 +607,26 @@ function detectReceiverAccountFromText_(text) {
   return Object.assign({ accountNumber: bestKey }, meta);
 }
 
+// Look up bank/account metadata by our account code (e.g., MAK+, GSB5)
+function findAccountMetaByCode_(code){
+  const want = String(code || '').trim().toUpperCase();
+  if (!want) return null;
+  for (const accNo in RECEIVER_ACCOUNTS){
+    const meta = RECEIVER_ACCOUNTS[accNo];
+    if (!meta) continue;
+    const metaCode = String(meta.code || '').trim().toUpperCase();
+    if (metaCode === want){
+      return {
+        accountNumber: accNo,
+        code: meta.code,
+        bank: meta.bank,
+        label: meta.label || ''
+      };
+    }
+  }
+  return null;
+}
+
 /***** OCR + PARSE *****/
 function ocrSlipFromFileId_PR_(fileId){
   if (!GCV_API_KEY) throw new Error('Missing GCV_API_KEY');
@@ -987,6 +1007,30 @@ function deriveBankMatchStatus_PR_(billAccountCode, ocrMetaObj){
   return 'receiver_mismatch';
 }
 
+// Merge OCR receiver info with bill metadata when OCR is missing/weak
+function resolveOcrMetaWithBill_(ocrMetaObj, billAccountCode){
+  const fallback = findAccountMetaByCode_(billAccountCode);
+  const normalizedOcrBank = normalizeBankFromCodeOrBank_PR_(ocrMetaObj?.bank || ocrMetaObj?.code);
+  const bank = normalizedOcrBank ||
+               normalizeBankFromCodeOrBank_PR_(fallback?.bank || fallback?.code) ||
+               'UNKNOWN';
+
+  const hasOcrCode = !!(ocrMetaObj && ocrMetaObj.code && ocrMetaObj.code !== 'NON_MATCH');
+  const hasOcrAcc  = !!(ocrMetaObj && ocrMetaObj.acc  && ocrMetaObj.acc  !== 'NON_MATCH');
+
+  const code = hasOcrCode ? ocrMetaObj.code : (fallback ? fallback.code : (ocrMetaObj?.code || 'NON_MATCH'));
+  const acc  = hasOcrAcc  ? ocrMetaObj.acc  : (fallback ? fallback.accountNumber : (ocrMetaObj?.acc  || 'NON_MATCH'));
+
+  const usedFallback = !!(fallback && (!hasOcrCode || !hasOcrAcc || !normalizedOcrBank));
+
+  return {
+    bank,
+    code: code || 'NON_MATCH',
+    acc:  acc  || 'NON_MATCH',
+    usedFallback
+  };
+}
+
 function tryMatchAndConfirm_PR_(args){
   const ym         = String(args.ym || '').trim();
   const room       = (args.room || '').toUpperCase().trim();
@@ -1063,6 +1107,7 @@ function tryMatchAndConfirm_PR_(args){
   }
 
   // 3) Try to find a bill candidate using OCR amount (if any) + selected month
+  const ocrMetaRaw = ocrMeta();
   const declaredAmount = (ocr && ocr.amount!=null)? Number(ocr.amount): null;
   const found = findCandidateBill_PR_({ room, declaredAmount, ym });
 
@@ -1074,9 +1119,9 @@ function tryMatchAndConfirm_PR_(args){
       confidence: 0.0,
       note: ocrOk ? 'no_open_bill (have OCR)' : 'no_open_bill (no/failed OCR)',
       ocrAmount: declaredAmount,
-      ocrBank: ocrMeta().bank,
-      ocrAccountCode: ocrMeta().code || 'NON_MATCH',
-      ocrAccountNo:   ocrMeta().acc  || 'NON_MATCH'
+      ocrBank: ocrMetaRaw.bank,
+      ocrAccountCode: ocrMetaRaw.code || 'NON_MATCH',
+      ocrAccountNo:   ocrMetaRaw.acc  || 'NON_MATCH'
     });
     enqueueReview_PR_({
       room, declaredAmount, reason:'no_open_bill',
@@ -1086,7 +1131,7 @@ function tryMatchAndConfirm_PR_(args){
       '⚠️ สลิปไม่มีบิลที่เปิดอยู่',
       room ? `ห้อง: ${room}` : '',
       declaredAmount!=null ? `OCR Amount: ${Number(declaredAmount).toLocaleString()}` : '',
-      ocrMeta().bank ? `ธนาคารจากสลิป: ${ocrMeta().bank}` : '',
+      ocrMetaRaw.bank ? `ธนาคารจากสลิป: ${ocrMetaRaw.bank}` : '',
       inbox.slipId ? `SlipID: ${inbox.slipId}` : ''
     ].filter(Boolean).join('\n'));
     return { ok:false, reason:'no_open_bill', slipId: inbox.slipId };
@@ -1100,9 +1145,9 @@ function tryMatchAndConfirm_PR_(args){
       confidence: 0.3,
       note: 'multiple candidates' + (ocrOk?' (have OCR)':' (no/failed OCR)'),
       ocrAmount: declaredAmount,
-      ocrBank: ocrMeta().bank,
-      ocrAccountCode: ocrMeta().code || 'NON_MATCH',
-      ocrAccountNo:   ocrMeta().acc  || 'NON_MATCH'
+      ocrBank: ocrMetaRaw.bank,
+      ocrAccountCode: ocrMetaRaw.code || 'NON_MATCH',
+      ocrAccountNo:   ocrMetaRaw.acc  || 'NON_MATCH'
     });
     enqueueReview_PR_({
       room, declaredAmount, reason:'ambiguous_candidates',
@@ -1122,7 +1167,9 @@ function tryMatchAndConfirm_PR_(args){
   const billAmt = Number(cand.amountDue);
   let conf      = 0.70;
   const billAccountCode = getBillAccountByRow_PR_(cand.rowIndex);
-  const bankMatchStatus = deriveBankMatchStatus_PR_(billAccountCode, ocrMeta());
+  const mergedOcrMeta   = resolveOcrMetaWithBill_(ocrMetaRaw, billAccountCode);
+  const bankMatchStatus = deriveBankMatchStatus_PR_(billAccountCode, mergedOcrMeta);
+  const receiverNote    = mergedOcrMeta.usedFallback ? ' (receiver inferred from bill account; OCR missing)' : '';
 
   // If OCR worked, compare amounts
   if (ocrOk && ocr.amount!=null){
@@ -1134,12 +1181,12 @@ function tryMatchAndConfirm_PR_(args){
         status: 'amount_mismatch',
         matchedBillId: cand.billId,
         confidence: 0.4,
-        note: `OCR amount=${ocr.amount}; bill=${billAmt}; Δ=${delta}`,
+        note: `OCR amount=${ocr.amount}; bill=${billAmt}; Δ=${delta}${receiverNote}`,
         ocrAmount: Number(ocr.amount),
         billAmount: billAmt,
-        ocrBank: ocrMeta().bank,
-        ocrAccountCode: ocrMeta().code,
-        ocrAccountNo:   ocrMeta().acc
+        ocrBank: mergedOcrMeta.bank,
+        ocrAccountCode: mergedOcrMeta.code,
+        ocrAccountNo:   mergedOcrMeta.acc
       });
       enqueueReview_PR_({
         room, billId:cand.billId,
@@ -1180,12 +1227,12 @@ function tryMatchAndConfirm_PR_(args){
       status: 'no_ocr_data',
       matchedBillId: cand.billId || '',
       confidence: 0.35,
-      note: 'Missing OCR amount → manual review',
+      note: `Missing OCR amount → manual review${receiverNote}`,
       ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
       billAmount: billAmt,
-      ocrBank: ocrMeta().bank,
-      ocrAccountCode: ocrMeta().code || 'NON_MATCH',
-      ocrAccountNo:   ocrMeta().acc  || 'NON_MATCH'
+      ocrBank: mergedOcrMeta.bank,
+      ocrAccountCode: mergedOcrMeta.code || 'NON_MATCH',
+      ocrAccountNo:   mergedOcrMeta.acc  || 'NON_MATCH'
     });
     enqueueReview_PR_({
       room,
@@ -1216,8 +1263,8 @@ function tryMatchAndConfirm_PR_(args){
   });
 
   const matchNote = ocrOk
-    ? `OCR OK; bank=${ocr.bank||''}; ref=${ocr.txId||''}`
-    : 'Matched using selected month (no OCR data)';
+    ? `OCR OK; bank=${ocr.bank||''}; ref=${ocr.txId||''}${receiverNote}`
+    : `Matched using selected month (no OCR data)${receiverNote}`;
 
   updateInboxMatchResult_PR_({
     rowIndex: inbox.rowIndex,
@@ -1227,9 +1274,9 @@ function tryMatchAndConfirm_PR_(args){
     note: matchNote,
     ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
     billAmount: billAmt,
-    ocrBank: ocrMeta().bank,
-    ocrAccountCode: ocrMeta().code,
-    ocrAccountNo:   ocrMeta().acc
+    ocrBank: mergedOcrMeta.bank,
+    ocrAccountCode: mergedOcrMeta.code,
+    ocrAccountNo:   mergedOcrMeta.acc
     // Amount_Delta will be computed in the updater if both provided
   });
   notifyGroupPaymentMatched_PR_({
