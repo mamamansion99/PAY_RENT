@@ -588,6 +588,18 @@ function detectReceiverAccountFromText_(text) {
     if (re.test(raw) && bestScore < 1) {
       bestScore = 1; bestKey = acc; return;
     }
+    // new: weak match for any 4-digit contiguous chunk inside the account (helps masked mids)
+    for (let i = 0; i <= acc.length - 4; i++) {
+      const chunk = acc.slice(i, i + 4);
+      if (digits.indexOf(chunk) >= 0 && bestScore < 0.6) {
+        bestScore = 0.6; bestKey = acc; return;
+      }
+      const chunkPattern = chunk.split('').map(ch => ch + '[\\dxX]*').join('');
+      const reChunk = new RegExp(chunkPattern, 'i');
+      if (reChunk.test(raw) && bestScore < 0.6) {
+        bestScore = 0.6; bestKey = acc; return;
+      }
+    }
   });
 
   if (!bestKey) return null;
