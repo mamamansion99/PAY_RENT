@@ -690,6 +690,11 @@ function parseThaiSlip_PR_(raw){
     }
   }
 
+  // Fallback: scan entire slip text for our receiver accounts even if no "เข้าบัญชี" label was detected
+  if (!receiver) {
+    receiver = detectReceiverAccountFromText_(text);
+  }
+
   if (!fromBank || !toBank) {
     const generic = detectBankCodeFromText_(text);
     if (!fromBank) fromBank = generic;
