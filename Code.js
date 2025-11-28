@@ -380,19 +380,21 @@ function onPostback_(ev){
 
   if (data.act === 'status') return push_(userId, [{ type:'text', text:'กำลังดึงสถานะล่าสุด…' }]);
   if (data.act === 'faq')    return push_(userId, [{ type:'text', text:'คำถามพบบ่อย: ยอด/กำหนดชำระ/ส่งสลิป ฯลฯ' }]);
-  if (data.act === 'howto')  return push_(userId, [{ type:'text', text:'วิธีชำระเงิน: 1) สแกน QR 2) โอน 3) อัปโหลดสลิปในแชทนี้' }]);
 
-    // ใน onPostback_(ev) …
   if (data.act === 'howto') {
-    // 1) โชว์โหลดระหว่างเตรียมคอนเทนต์ (ปรับเวลาตามจริง)
+    // โชว์โหลดระหว่างเตรียมคอนเทนต์ (ปรับเวลาตามจริง)
     startLoading_(userId, 6);
 
-    // 2) ตัวอย่างขั้นต่ำ: ส่งข้อความ + รูปเดียว (เลือกใช้อย่างใดอย่างหนึ่งด้านบนแทนได้)
+    // ตัวอย่างขั้นต่ำ: ส่งข้อความ + รูปเดียว (ปิดรูปถ้ายังไม่ได้ตั้งค่า URL)
     const HOWTO_IMAGE_URL = 'https://.../howto_rent_payment_step.jpg'; // TODO: ใส่ URL จริง
-    return push_(userId, [
-      { type:'text', text:'ขั้นตอนการชำระค่าเช่า:\n1) เลือกเดือนให้ตรงรอบบิล\n2) โอน/สแกน QR ตามยอดบิล\n3) อัปโหลดสลิปในแชทนี้ แล้วรอยืนยันผล' },
-      { type:'image', originalContentUrl: HOWTO_IMAGE_URL, previewImageUrl: HOWTO_IMAGE_URL }
-    ]);
+    const hasImage = HOWTO_IMAGE_URL && !HOWTO_IMAGE_URL.includes('...');
+    const messages = [
+      { type:'text', text:'ขั้นตอนการชำระค่าเช่า:\n1) เลือกเดือนให้ตรงรอบบิล\n2) โอน/สแกน QR ตามยอดบิล\n3) อัปโหลดสลิปในแชทนี้ แล้วรอยืนยันผล' }
+    ];
+    if (hasImage) {
+      messages.push({ type:'image', originalContentUrl: HOWTO_IMAGE_URL, previewImageUrl: HOWTO_IMAGE_URL });
+    }
+    return push_(userId, messages);
   }
 
 }
