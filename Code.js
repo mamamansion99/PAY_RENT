@@ -568,6 +568,27 @@ function detectReceiverAccountFromText_(text) {
   const raw    = String(text || '');
   if (!digits) return null;
 
+  // Helper: allow masked digits (X) to stand in for any digit, scanning for tails
+  function maskedTailScore(accNumber, maskedText){
+    const accDigits = onlyDigits_(accNumber);
+    const masked = String(maskedText || '').replace(/[^0-9xX]/g,'');
+    if (!masked || masked.length < 4) return 0;
+    const maxLen = Math.min(accDigits.length, 6); // focus on tail 4–6
+    for (let len = maxLen; len >= 4; len--){
+      const tail = accDigits.slice(-len);
+      const limit = masked.length - len;
+      for (let i=0; i<=limit; i++){
+        let ok = true;
+        for (let k=0; k<len; k++){
+          const ch = masked[i+k];
+          if (!(ch === tail[k] || ch === 'x' || ch === 'X')) { ok = false; break; }
+        }
+        if (ok) return len; // longest-first search, so return immediately
+      }
+    }
+    return 0;
+  }
+
   let bestKey = null;
   let bestScore = 0;
 
@@ -601,6 +622,14 @@ function detectReceiverAccountFromText_(text) {
       if (reChunk.test(raw) && bestScore < 0.6) {
         bestScore = 0.6; bestKey = acc; return;
       }
+    }
+
+    // Try masked-tail match (e.g., XXX-3-83688-X) – prefer longer tails
+    const maskedScore = maskedTailScore(acc, raw);
+    if (maskedScore >= 4 && bestScore < (1 + 0.25 * maskedScore)) {
+      bestScore = 1 + 0.25 * maskedScore; // 4→2.0, 5→2.25, 6→2.5
+      bestKey = acc;
+      return;
     }
   });
 
@@ -699,6 +728,18 @@ function parseThaiSlip_PR_(raw){
     const generic = detectBankCodeFromText_(text);
     if (!fromBank) fromBank = generic;
     if (!toBank)   toBank   = generic;
+  }
+
+  // If labels missing: infer by top→bottom order of bank mentions (most slips list sender first, receiver second)
+  if (!fromBank || !toBank) {
+    const banks = [];
+    lines.forEach(ln => {
+      const b = detectBankCodeFromText_(ln);
+      if (b && banks[banks.length-1] !== b) banks.push(b);
+    });
+    if (!fromBank && banks.length) fromBank = banks[0];
+    if (!toBank && banks.length >= 2) toBank = banks[banks.length-1];
+    else if (!toBank && banks.length) toBank = banks[0];
   }
 
   // helper: is a line a "fee/commission" line?
