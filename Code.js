@@ -659,14 +659,13 @@ function findAccountMetaByCode_(code){
 }
 
 /***** OCR + PARSE *****/
-function ocrSlipFromFileId_PR_(fileId){
+function visionOcrFromBlob_PR_(blob, featureType){
   if (!GCV_API_KEY) throw new Error('Missing GCV_API_KEY');
-  const blob = DriveApp.getFileById(fileId).getBlob();
   const b64  = Utilities.base64Encode(blob.getBytes());
   const url = 'https://vision.googleapis.com/v1/images:annotate?key=' + encodeURIComponent(GCV_API_KEY);
   const payload = { requests: [{
     image:{ content:b64 },
-    features:[{type:'DOCUMENT_TEXT_DETECTION'}],
+    features:[{type: featureType || 'DOCUMENT_TEXT_DETECTION'}],
     imageContext:{ languageHints:['th','en'] }
   }]};
   const res = UrlFetchApp.fetch(url,{
@@ -675,7 +674,99 @@ function ocrSlipFromFileId_PR_(fileId){
   });
   if (res.getResponseCode() >= 300) throw new Error('Vision '+res.getResponseCode()+' '+res.getContentText());
   const data = JSON.parse(res.getContentText());
-  return data.responses?.[0]?.fullTextAnnotation?.text || '';
+  const resp = data.responses && data.responses[0];
+  // prefer fullTextAnnotation, fallback to textAnnotations[0]
+  return resp?.fullTextAnnotation?.text || resp?.textAnnotations?.[0]?.description || '';
+}
+
+function ocrSlipFromFileId_PR_(fileId){
+  const blob = DriveApp.getFileById(fileId).getBlob();
+  return visionOcrFromBlob_PR_(blob, 'DOCUMENT_TEXT_DETECTION');
+}
+
+function scaleImageForOcr_PR_(blob, factor){
+  try{
+    const img = ImagesService.open(blob);
+    const w = img.getWidth(), h = img.getHeight();
+    if (!w || !h) return null;
+    const newW = Math.min(Math.round(w * factor), 2200);
+    const newH = Math.min(Math.round(h * factor), 2200);
+    if (newW <= w && newH <= h) return null;
+    return img.resize(newW, newH).getBlob();
+  }catch(e){
+    console.error('scaleImageForOcr_PR_', e);
+    return null;
+  }
+}
+
+function driveOcrText_PR_(blob){
+  // Use Drive OCR as a last resort for faint/low-contrast slips
+  let docId = '';
+  try{
+    const created = Drive.Files.insert(
+      { title: 'tmp-slip-ocr', mimeType: 'application/vnd.google-apps.document' },
+      blob,
+      { ocr:true, ocrLanguage:'th' }
+    );
+    docId = created.id || '';
+    if (!docId) return '';
+    const doc = DocumentApp.openById(docId);
+    return doc.getBody().getText() || '';
+  }catch(e){
+    console.error('driveOcrText_PR_', e);
+    return '';
+  }finally{
+    if (docId){
+      try{ Drive.Files.remove(docId); }catch(e1){ try{ Drive.Files.trash(docId); }catch(e2){} }
+    }
+  }
+}
+
+function ocrSlipWithFallbacks_PR_(fileId){
+  const file = DriveApp.getFileById(fileId);
+  const origBlob = file.getBlob();
+  const attempts = [];
+  const hasAmount = (ocrObj) => !!(ocrObj && ocrObj.amount != null);
+  const pickLonger = (a,b) => {
+    const lenA = a && a.raw ? a.raw.length : 0;
+    const lenB = b && b.raw ? b.raw.length : 0;
+    return lenB > lenA ? b : a;
+  };
+  const wrap = (obj) => Object.assign({ attempts }, obj);
+
+  function attempt(label, fn){
+    try{
+      const raw = fn() || '';
+      const ocr = raw ? parseThaiSlip_PR_(raw) : null;
+      attempts.push(label + (raw ? '' : ' (empty)'));
+      return { source: label, raw, ocr };
+    }catch(e){
+      attempts.push(label + ' (err)');
+      console.error('OCR attempt failed', label, e);
+      return null;
+    }
+  }
+
+  let best = attempt('vision', () => visionOcrFromBlob_PR_(origBlob, 'DOCUMENT_TEXT_DETECTION'));
+  if (hasAmount(best?.ocr)) return wrap(best);
+
+  const bigger = scaleImageForOcr_PR_(origBlob, 1.6);
+  if (bigger){
+    const res = attempt('vision_scaled', () => visionOcrFromBlob_PR_(bigger, 'DOCUMENT_TEXT_DETECTION'));
+    if (hasAmount(res?.ocr)) return wrap(res);
+    best = pickLonger(best, res);
+  }
+
+  const resText = attempt('vision_text', () => visionOcrFromBlob_PR_(origBlob, 'TEXT_DETECTION'));
+  if (hasAmount(resText?.ocr)) return wrap(resText);
+  best = pickLonger(best, resText);
+
+  const resDrive = attempt('drive_ocr', () => driveOcrText_PR_(origBlob));
+  if (hasAmount(resDrive?.ocr)) return wrap(resDrive);
+  best = pickLonger(best, resDrive);
+
+  if (best) return wrap(best);
+  return wrap({ source:'vision', raw:'', ocr:null });
 }
 
 const TH_MONTHS_PR = {'ม.ค.':1,'มกราคม':1,'ก.พ.':2,'กุมภาพันธ์':2,'มี.ค.':3,'มีนาคม':3,'เม.ย.':4,'เมษายน':4,'พ.ค.':5,'พฤษภาคม':5,'มิ.ย.':6,'มิถุนายน':6,'ก.ค.':7,'กรกฎาคม':7,'ส.ค.':8,'สิงหาคม':8,'ก.ย.':9,'กันยายน':9,'ต.ค.':10,'ตุลาคม':10,'พ.ย.':11,'พฤศจิกายน':11,'ธ.ค.':12,'ธันวาคม':12};
@@ -694,10 +785,12 @@ function parseThaiSlip_PR_(raw){
 
   const NEG = /(ค่\s*า\s*ธ\s*ร\s*ร\s*ม\s*เ\s*นี\s*ย\s*ม|ค่าธรรมเนียม|fee|charge|ค่าบริการ|ค่าทำเนียม)/i;
   const CURR = /(บาท|THB)/i;
-  const LABEL = /(จำนวนเงิน(?:ที่\s*ชำระ)?|ยอดชำระ|ยอดรวมสุทธิ|ยอดรวม|amount\s*paid|total\s*amount|amount)/i;
+  const LABEL = /(จำนวนเงิน(?:ที่\s*ชำระ)?|ยอดชำระ|ยอดรวมสุทธิ|ยอดรวม|amount\s*paid|total\s*amount|amount|จำนวน\s*[:=])/i;
 
   // split to lines for line-based proximity
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const lines = text.split(/\r?\n/)
+    .map(s => s.replace(/(\d)[ \u00A0]+(?=[\d,\.])/g, '$1').trim()) // รวมเลขที่ถูก OCR แยกด้วยช่องว่าง
+    .filter(Boolean);
 
   // NEW: try to identify sender/receiver bank + receiver account
   let fromBank = '';
@@ -798,6 +891,33 @@ function parseThaiSlip_PR_(raw){
   if (loose.length) {
     // เลือกค่าที่มากที่สุดในบรรทัด anchor (กัน 89/705 นำหน้า)
     const v = loose.sort((a,b)=>b-a)[0];
+    return finalize(v, text);
+  }
+
+  // 3.5) PASS D: fallback เก็บเลขที่ “ดูเหมือนยอดเงิน” แม้ไม่มี label/currency (กรณี OCR พังคำว่า จำนวนเงิน)
+  // เลือกเฉพาะตัวที่มีจุด/คอมมา หรือจำนวนหลักไม่เกิน 7 (กันเลขบัญชี/อ้างอิงที่ยาวเกิน)
+  const moneyishPunct = [];
+  const moneyishPlain = [];
+  for (const seg of lines) {
+    if (isFeeLine(seg)) continue;
+    const nums = seg.match(/\b\d[\d,\.]{0,12}\d\b/g);
+    if (!nums) continue;
+    for (const s of nums) {
+      const v = toNum(s);
+      if (!isFinite(v) || v <= 0) continue;
+      const digitCount = (s.match(/\d/g) || []).length;
+      const hasPunct = /[.,]/.test(s);
+      if (digitCount >= 9 && !hasPunct) continue; // น่าจะเป็น ref/account มากกว่า
+      if (hasPunct) moneyishPunct.push(v);
+      else if (digitCount <= 7) moneyishPlain.push(v);
+    }
+  }
+  if (moneyishPunct.length) {
+    const v = moneyishPunct.sort((a,b)=>b-a)[0];
+    return finalize(v, text);
+  }
+  if (moneyishPlain.length) {
+    const v = moneyishPlain.sort((a,b)=>b-a)[0];
     return finalize(v, text);
   }
 
@@ -1092,7 +1212,7 @@ function tryMatchAndConfirm_PR_(args){
   });
 
   // 2) OCR
-  let ocr = null, ocrOk = false;
+  let ocr = null, ocrOk = false, ocrSource = 'vision';
   const ocrMeta = () => {
     if (!ocr) return { bank:'UNKNOWN', code:'NON_MATCH', acc:'NON_MATCH' };
     const bank = ocr.receiverBank || ocr.bank || 'UNKNOWN';
@@ -1108,8 +1228,12 @@ function tryMatchAndConfirm_PR_(args){
   };
   if (fileId){
     try{
-      const raw = ocrSlipFromFileId_PR_(fileId);
-      ocr = parseThaiSlip_PR_(raw);
+      const ocrResult = ocrSlipWithFallbacks_PR_(fileId);
+      ocr = ocrResult ? ocrResult.ocr : null;
+      ocrSource = ocrResult ? (ocrResult.source || 'vision') : 'vision';
+      const ocrPassTrail = (ocrResult && ocrResult.attempts && ocrResult.attempts.length)
+        ? ` [${ocrResult.attempts.join(' -> ')}]`
+        : '';
       ocrOk = !!(ocr && (ocr.amount!=null || ocr.txDate || ocr.txId || ocr.bank));
 
       updateInboxMatchResult_PR_({
@@ -1117,7 +1241,7 @@ function tryMatchAndConfirm_PR_(args){
         status: 'pending_ocr',
         matchedBillId: '',
         confidence: '',
-        note: `OCR: amount=${ocr?.amount ?? ''}, date=${ocr?.txDate? Utilities.formatDate(ocr.txDate,'Asia/Bangkok','yyyy-MM-dd') : ''}, bank=${ocr?.bank ?? ''}, ref=${ocr?.txId ?? ''}`,
+        note: `OCR(${ocrSource}): amount=${ocr?.amount ?? ''}, date=${ocr?.txDate? Utilities.formatDate(ocr.txDate,'Asia/Bangkok','yyyy-MM-dd') : ''}, bank=${ocr?.bank ?? ''}, ref=${ocr?.txId ?? ''}${ocrPassTrail}`,
         ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
         ocrBank: ocrMeta().bank,
         ocrAccountCode: ocrMeta().code,
@@ -1275,7 +1399,7 @@ function tryMatchAndConfirm_PR_(args){
       status: 'no_ocr_data',
       matchedBillId: cand.billId || '',
       confidence: 0.35,
-      note: `Missing OCR amount → manual review${receiverNote}`,
+      note: `Missing OCR amount (${ocrSource}) → manual review${receiverNote}`,
       ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
       billAmount: billAmt,
       ocrBank: mergedOcrMeta.bank,
