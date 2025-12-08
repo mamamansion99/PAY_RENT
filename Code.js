@@ -988,7 +988,7 @@ function genReceiptId_PR_(){
 }
 function appendReceiptLedger_PR_(entry){
   try {
-    const sh = openRevenueSheetByName_PR_('receipt_ledger');
+    const sh = openRevenueSheetByName_PR_('Receipts_Ledger');
     const hdr = getHeaders_PR_(sh);
     const row = new Array(hdr.length).fill('');
     const set = (key, value) => {
