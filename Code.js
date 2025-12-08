@@ -999,8 +999,6 @@ function appendReceiptLedger_PR_(entry){
       const idx = idxOf_PR_(hdr, key);
       if (idx > -1) row[idx] = value != null ? Number(value) : '';
     };
-    const receiptId = entry.receiptId || genReceiptId_PR_();
-    set('ReceiptID', receiptId);
     set('Date', entry.date || new Date());
     set('YM', entry.ym || '');
     set('TxnType', entry.txnType || '');
@@ -1008,15 +1006,29 @@ function appendReceiptLedger_PR_(entry){
     setNum('Amount', entry.amount);
     set('BankAccountCode', entry.bankAccountCode || '');
     set('BillID', entry.billId || '');
-    set('SlipID', entry.slipId || '');
     set('SlipLink', entry.slipLink || '');
     set('BankTxnID', entry.bankTxnId || '');
     set('LineUserId', entry.lineUserId || '');
     set('Source', entry.source || '');
     set('Note', entry.note || '');
-    sh.getRange(sh.getLastRow()+1,1,1,row.length).setValues([row]);
-    console.log('appendReceiptLedger_PR_: appended row', { receiptId, billId: entry.billId, amount: entry.amount });
-    return receiptId;
+
+    const maxRows = Math.max(sh.getMaxRows(), 2);
+    const checkCols = Math.min(Math.max(hdr.length - 1, 1), 13);
+    const rowsToCheck = Math.max(maxRows - 1, 1);
+    const dataCheck = sh.getRange(2, 2, rowsToCheck, checkCols).getValues();
+    let lastDataRow = 1;
+    for (let i = dataCheck.length - 1; i >= 0; i--) {
+      const rowValues = dataCheck[i];
+      if (rowValues.some((cell) => cell !== '' && cell != null)) {
+        lastDataRow = i + 2;
+        break;
+      }
+    }
+    const targetRow = Math.max(lastDataRow + 1, 2);
+
+    sh.getRange(targetRow, 1, 1, row.length).setValues([row]);
+    console.log('appendReceiptLedger_PR_: appended row', { row: targetRow, billId: entry.billId, amount: entry.amount });
+    return targetRow;
   } catch (err) {
     console.error('appendReceiptLedger_PR_ failed', err, entry);
     return '';
@@ -1501,7 +1513,7 @@ function tryMatchAndConfirm_PR_(args){
     confidence: conf,
     status: 'matched_auto'
   });
-  const receiptLedgerId = appendReceiptLedger_PR_({
+  const ledgerRow = appendReceiptLedger_PR_({
     ym: String(cand.month || '').trim(),
     txnType: 'RentPayment',
     category: 'RENT_PAYMENT',
@@ -1515,7 +1527,7 @@ function tryMatchAndConfirm_PR_(args){
     source: 'PAY_RENT',
     note: matchNote
   });
-  if (!receiptLedgerId) {
+  if (!ledgerRow) {
     console.warn('receipt ledger append failed for slip', inbox.slipId);
   }
 
