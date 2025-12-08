@@ -1219,8 +1219,11 @@ function normalizeBankFromCodeOrBank_PR_(val){
 }
 
 function deriveBankMatchStatus_PR_(billAccountCode, ocrMetaObj){
-  const billBank = normalizeBankFromCodeOrBank_PR_(billAccountCode);
-  const ocrBank  = normalizeBankFromCodeOrBank_PR_(ocrMetaObj?.bank || ocrMetaObj?.code);
+  let billBank = normalizeBankFromCodeOrBank_PR_(billAccountCode);
+  const ocrBank = normalizeBankFromCodeOrBank_PR_(ocrMetaObj?.bank || ocrMetaObj?.code);
+  if (!billBank && ocrBank) {
+    billBank = ocrBank;
+  }
   if (!billBank) return 'receiver_unknown';
   if (!ocrBank || ocrBank === 'NON_MATCH') return 'receiver_non_match';
   if (billBank === ocrBank) return 'receiver_matched';
@@ -1392,9 +1395,12 @@ function tryMatchAndConfirm_PR_(args){
   let conf      = 0.70;
   const billAccountCode = getBillAccountByRow_PR_(cand.rowIndex);
   const mergedOcrMeta   = resolveOcrMetaWithBill_(ocrMetaRaw, billAccountCode);
-  const bankMatchStatus = deriveBankMatchStatus_PR_(billAccountCode, mergedOcrMeta);
+  const normalizedBank = normalizeBankFromCodeOrBank_PR_(billAccountCode) ||
+                         normalizeBankFromCodeOrBank_PR_(mergedOcrMeta.bank) ||
+                         normalizeBankFromCodeOrBank_PR_(mergedOcrMeta.code);
+  const accountCodeToWrite = normalizedBank || billAccountCode || mergedOcrMeta.code || mergedOcrMeta.acc || '';
+  const bankMatchStatus = deriveBankMatchStatus_PR_(accountCodeToWrite, mergedOcrMeta);
   const receiverNote    = mergedOcrMeta.usedFallback ? ' (receiver inferred from bill account; OCR missing)' : '';
-  const accountCodeToWrite = billAccountCode || mergedOcrMeta.code || mergedOcrMeta.acc || '';
 
   // If OCR worked, compare amounts
   if (ocrOk && ocr.amount!=null){
