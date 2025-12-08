@@ -1016,10 +1016,24 @@ function appendReceiptLedger_PR_(entry){
     setValueForKey('Source', entry.source || '');
     setValueForKey('Note', entry.note || '');
 
-    const targetRow = sh.getLastRow() + 1;
+    const startRow = 2;
+    const maxRows = Math.max(sh.getMaxRows(), startRow);
+    const checkCols = Math.min(Math.max(hdr.length - 1, 1), 13);
+    const rowsToCheck = Math.max(maxRows - startRow + 1, 1);
+    const dataCheck = sh.getRange(startRow, 2, rowsToCheck, checkCols).getValues();
+    let lastDataRow = startRow - 1;
+    for (let i = dataCheck.length - 1; i >= 0; i--) {
+      const rowValues = dataCheck[i];
+      if (rowValues.some((cell) => cell !== '' && cell != null)) {
+        lastDataRow = startRow + i;
+        break;
+      }
+    }
+    const targetRow = Math.max(lastDataRow + 1, startRow);
     if (targetRow > sh.getMaxRows()) {
       sh.insertRowsAfter(sh.getMaxRows(), targetRow - sh.getMaxRows());
     }
+
     writes.forEach(({ col, value }) => {
       sh.getRange(targetRow, col).setValue(value);
     });
