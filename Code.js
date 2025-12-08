@@ -987,34 +987,40 @@ function genReceiptId_PR_(){
   return `RCPT${ts}${r}`;
 }
 function appendReceiptLedger_PR_(entry){
-  const sh = openRevenueSheetByName_PR_('receipt_ledger');
-  const hdr = getHeaders_PR_(sh);
-  const row = new Array(hdr.length).fill('');
-  const set = (key, value) => {
-    const idx = idxOf_PR_(hdr, key);
-    if (idx > -1) row[idx] = value ?? '';
-  };
-  const setNum = (key, value) => {
-    const idx = idxOf_PR_(hdr, key);
-    if (idx > -1) row[idx] = value != null ? Number(value) : '';
-  };
-  const receiptId = entry.receiptId || genReceiptId_PR_();
-  set('ReceiptID', receiptId);
-  set('Date', entry.date || new Date());
-  set('YM', entry.ym || '');
-  set('TxnType', entry.txnType || '');
-  set('Category', entry.category || '');
-  setNum('Amount', entry.amount);
-  set('BankAccountCode', entry.bankAccountCode || '');
-  set('BillID', entry.billId || '');
-  set('SlipID', entry.slipId || '');
-  set('SlipLink', entry.slipLink || '');
-  set('BankTxnID', entry.bankTxnId || '');
-  set('LineUserId', entry.lineUserId || '');
-  set('Source', entry.source || '');
-  set('Note', entry.note || '');
-  sh.getRange(sh.getLastRow()+1,1,1,row.length).setValues([row]);
-  return receiptId;
+  try {
+    const sh = openRevenueSheetByName_PR_('receipt_ledger');
+    const hdr = getHeaders_PR_(sh);
+    const row = new Array(hdr.length).fill('');
+    const set = (key, value) => {
+      const idx = idxOf_PR_(hdr, key);
+      if (idx > -1) row[idx] = value ?? '';
+    };
+    const setNum = (key, value) => {
+      const idx = idxOf_PR_(hdr, key);
+      if (idx > -1) row[idx] = value != null ? Number(value) : '';
+    };
+    const receiptId = entry.receiptId || genReceiptId_PR_();
+    set('ReceiptID', receiptId);
+    set('Date', entry.date || new Date());
+    set('YM', entry.ym || '');
+    set('TxnType', entry.txnType || '');
+    set('Category', entry.category || '');
+    setNum('Amount', entry.amount);
+    set('BankAccountCode', entry.bankAccountCode || '');
+    set('BillID', entry.billId || '');
+    set('SlipID', entry.slipId || '');
+    set('SlipLink', entry.slipLink || '');
+    set('BankTxnID', entry.bankTxnId || '');
+    set('LineUserId', entry.lineUserId || '');
+    set('Source', entry.source || '');
+    set('Note', entry.note || '');
+    sh.getRange(sh.getLastRow()+1,1,1,row.length).setValues([row]);
+    console.log('appendReceiptLedger_PR_: appended row', { receiptId, billId: entry.billId, amount: entry.amount });
+    return receiptId;
+  } catch (err) {
+    console.error('appendReceiptLedger_PR_ failed', err, entry);
+    return '';
+  }
 }
 
 function recordSlipToInbox_PR_({ lineUserId, room, slipUrl, declaredAmount, note }){
@@ -1495,7 +1501,7 @@ function tryMatchAndConfirm_PR_(args){
     confidence: conf,
     status: 'matched_auto'
   });
-  appendReceiptLedger_PR_({
+  const receiptLedgerId = appendReceiptLedger_PR_({
     ym: String(cand.month || '').trim(),
     txnType: 'RentPayment',
     category: 'RENT_PAYMENT',
@@ -1509,6 +1515,9 @@ function tryMatchAndConfirm_PR_(args){
     source: 'PAY_RENT',
     note: matchNote
   });
+  if (!receiptLedgerId) {
+    console.warn('receipt ledger append failed for slip', inbox.slipId);
+  }
 
   return {
     ok:true,
