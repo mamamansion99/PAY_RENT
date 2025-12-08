@@ -990,43 +990,40 @@ function appendReceiptLedger_PR_(entry){
   try {
     const sh = openRevenueSheetByName_PR_('Receipts_Ledger');
     const hdr = getHeaders_PR_(sh);
-    const row = new Array(hdr.length).fill('');
-    const set = (key, value) => {
+    const writes = [];
+    const setValueForKey = (key, value) => {
+      if (!key || key === 'ReceiptID' || key === 'SlipID') return;
       const idx = idxOf_PR_(hdr, key);
-      if (idx > -1) row[idx] = value ?? '';
-    };
-    const setNum = (key, value) => {
-      const idx = idxOf_PR_(hdr, key);
-      if (idx > -1) row[idx] = value != null ? Number(value) : '';
-    };
-    set('Date', entry.date || new Date());
-    set('YM', entry.ym || '');
-    set('TxnType', entry.txnType || '');
-    set('Category', entry.category || '');
-    setNum('Amount', entry.amount);
-    set('BankAccountCode', entry.bankAccountCode || '');
-    set('BillID', entry.billId || '');
-    set('SlipLink', entry.slipLink || '');
-    set('BankTxnID', entry.bankTxnId || '');
-    set('LineUserId', entry.lineUserId || '');
-    set('Source', entry.source || '');
-    set('Note', entry.note || '');
-
-    const maxRows = Math.max(sh.getMaxRows(), 2);
-    const checkCols = Math.min(Math.max(hdr.length - 1, 1), 13);
-    const rowsToCheck = Math.max(maxRows - 1, 1);
-    const dataCheck = sh.getRange(2, 2, rowsToCheck, checkCols).getValues();
-    let lastDataRow = 1;
-    for (let i = dataCheck.length - 1; i >= 0; i--) {
-      const rowValues = dataCheck[i];
-      if (rowValues.some((cell) => cell !== '' && cell != null)) {
-        lastDataRow = i + 2;
-        break;
+      if (idx > -1) {
+        writes.push({ col: idx + 1, value: value ?? '' });
       }
-    }
-    const targetRow = Math.max(lastDataRow + 1, 2);
+    };
+    const setNumberForKey = (key, value) => {
+      if (value == null) return setValueForKey(key, '');
+      setValueForKey(key, Number(value));
+    };
 
-    sh.getRange(targetRow, 1, 1, row.length).setValues([row]);
+    setValueForKey('Date', entry.date || new Date());
+    setValueForKey('YM', entry.ym || '');
+    setValueForKey('TxnType', entry.txnType || '');
+    setValueForKey('Category', entry.category || '');
+    setNumberForKey('Amount', entry.amount);
+    setValueForKey('BankAccountCode', entry.bankAccountCode || '');
+    setValueForKey('BillID', entry.billId || '');
+    setValueForKey('SlipLink', entry.slipLink || '');
+    setValueForKey('BankTxnID', entry.bankTxnId || '');
+    setValueForKey('LineUserId', entry.lineUserId || '');
+    setValueForKey('Source', entry.source || '');
+    setValueForKey('Note', entry.note || '');
+
+    const targetRow = sh.getLastRow() + 1;
+    if (targetRow > sh.getMaxRows()) {
+      sh.insertRowsAfter(sh.getMaxRows(), targetRow - sh.getMaxRows());
+    }
+    writes.forEach(({ col, value }) => {
+      sh.getRange(targetRow, col).setValue(value);
+    });
+
     console.log('appendReceiptLedger_PR_: appended row', { row: targetRow, billId: entry.billId, amount: entry.amount });
     return targetRow;
   } catch (err) {
