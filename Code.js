@@ -1109,17 +1109,19 @@ function findCandidateBill_PR_({ room, declaredAmount, ym }) {
 
 
 
-function updateBillWithSlip_PR_({ rowIndex, slipId, markStatus, bankMatchStatus }){
+function updateBillWithSlip_PR_({ rowIndex, slipId, markStatus, bankMatchStatus, accountCode }){
   const sh  = openRevenueSheetByName_PR_('Horga_Bills');
   const hdr = getHeaders_PR_(sh);
   const cStatus    = idxOf_PR_(hdr,'status');
   const cPaidAt    = idxOf_PR_(hdr,'paidat');
   const cSlip      = idxOf_PR_(hdr,'slipid');
   const cBankMatch = idxOf_PR_(hdr,'bankmatchstatus');
+  const cAccount   = idxOf_PR_(hdr,'account');
   if (cSlip>-1)     sh.getRange(rowIndex, cSlip+1).setValue(slipId);
   if (cPaidAt>-1)   sh.getRange(rowIndex, cPaidAt+1).setValue(new Date());
   if (cStatus>-1)   sh.getRange(rowIndex, cStatus+1).setValue(markStatus||'Slip Received');
   if (cBankMatch>-1 && bankMatchStatus) sh.getRange(rowIndex, cBankMatch+1).setValue(bankMatchStatus);
+  if (cAccount>-1 && accountCode) sh.getRange(rowIndex, cAccount+1).setValue(accountCode);
 }
 
 function updateInboxMatchResult_PR_({
@@ -1219,7 +1221,7 @@ function normalizeBankFromCodeOrBank_PR_(val){
 function deriveBankMatchStatus_PR_(billAccountCode, ocrMetaObj){
   const billBank = normalizeBankFromCodeOrBank_PR_(billAccountCode);
   const ocrBank  = normalizeBankFromCodeOrBank_PR_(ocrMetaObj?.bank || ocrMetaObj?.code);
-  if (!billBank) return '';
+  if (!billBank) return 'receiver_unknown';
   if (!ocrBank || ocrBank === 'NON_MATCH') return 'receiver_non_match';
   if (billBank === ocrBank) return 'receiver_matched';
   return 'receiver_mismatch';
@@ -1392,6 +1394,7 @@ function tryMatchAndConfirm_PR_(args){
   const mergedOcrMeta   = resolveOcrMetaWithBill_(ocrMetaRaw, billAccountCode);
   const bankMatchStatus = deriveBankMatchStatus_PR_(billAccountCode, mergedOcrMeta);
   const receiverNote    = mergedOcrMeta.usedFallback ? ' (receiver inferred from bill account; OCR missing)' : '';
+  const accountCodeToWrite = billAccountCode || mergedOcrMeta.code || mergedOcrMeta.acc || '';
 
   // If OCR worked, compare amounts
   if (ocrOk && ocr.amount!=null){
@@ -1481,7 +1484,8 @@ function tryMatchAndConfirm_PR_(args){
     rowIndex: cand.rowIndex,
     slipId: inbox.slipId,
     markStatus:'Slip Received',
-    bankMatchStatus
+    bankMatchStatus,
+    accountCode: accountCodeToWrite
   });
 
   const matchNote = ocrOk
