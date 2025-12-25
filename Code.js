@@ -602,27 +602,6 @@ function detectReceiverAccountFromText_(text) {
     if (digits.indexOf(tail6) >= 0 && bestScore < 2) {
       bestScore = 2; bestKey = acc; return;
     }
-    if (digits.indexOf(tail4) >= 0 && bestScore < 1.2) {
-      bestScore = 1.2; bestKey = acc; return;
-    }
-    // new: match masked accounts that still reveal 4 digits (allow x/digits between)
-    const seqPattern = tail4.split('').map(ch => ch + '[\\dxX]*').join('');
-    const re = new RegExp(seqPattern, 'i');
-    if (re.test(raw) && bestScore < 1) {
-      bestScore = 1; bestKey = acc; return;
-    }
-    // new: weak match for any 4-digit contiguous chunk inside the account (helps masked mids)
-    for (let i = 0; i <= acc.length - 4; i++) {
-      const chunk = acc.slice(i, i + 4);
-      if (digits.indexOf(chunk) >= 0 && bestScore < 0.6) {
-        bestScore = 0.6; bestKey = acc; return;
-      }
-      const chunkPattern = chunk.split('').map(ch => ch + '[\\dxX]*').join('');
-      const reChunk = new RegExp(chunkPattern, 'i');
-      if (reChunk.test(raw) && bestScore < 0.6) {
-        bestScore = 0.6; bestKey = acc; return;
-      }
-    }
 
     // Try masked-tail match (e.g., XXX-3-83688-X) – prefer longer tails
     const maskedScore = maskedTailScore(acc, raw);
@@ -633,7 +612,8 @@ function detectReceiverAccountFromText_(text) {
     }
   });
 
-  if (!bestKey) return null;
+  // Require at least a 6-digit tail (score>=2) or better to avoid false positives from 4-digit overlaps
+  if (!bestKey || bestScore < 2) return null;
   const meta = RECEIVER_ACCOUNTS[bestKey];
   return Object.assign({ accountNumber: bestKey }, meta);
 }
@@ -778,9 +758,29 @@ function parseThaiSlip_PR_(raw){
   const text  = text0.replace(/[^\S\r\n]+/g, ' ').trim(); // อย่าลบ \n
 
   const toNum = (s) => {
-    const cleaned = String(s || '').replace(/,/g,'').replace(/(,|\.)$/, '');
-    const v = Number(cleaned.replace(',', '.'));
-    return isFinite(v) ? v : NaN;
+    // Normalize common OCR quirks like "4.900.00" (dot as thousands + dot as decimal)
+    const cleaned = String(s || '').replace(/[^\d.,]/g, '');
+    if (!cleaned) return NaN;
+
+    const parts = cleaned.split(/[.,]/);
+    if (parts.length > 2) {
+      // Keep the last part as decimal, merge the rest as integer
+      const decimal = parts.pop();
+      const intPart = parts.join('');
+      const merged = `${intPart}.${decimal}`;
+      const v = Number(merged);
+      if (isFinite(v)) return v;
+    }
+
+    // Fallback: treat comma as thousands separator, last dot/comma as decimal
+    const normalized = cleaned.replace(/,/g, '');
+    const v = Number(normalized);
+    if (isFinite(v)) return v;
+
+    // Last resort: strip all punctuation
+    const plain = cleaned.replace(/[.,]/g, '');
+    const v2 = Number(plain);
+    return isFinite(v2) ? v2 : NaN;
   };
 
   const NEG = /(ค่\s*า\s*ธ\s*ร\s*ร\s*ม\s*เ\s*นี\s*ย\s*ม|ค่าธรรมเนียม|fee|charge|ค่าบริการ|ค่าทำเนียม)/i;
@@ -1153,22 +1153,39 @@ function updateInboxMatchResult_PR_({
 }){
   const sh  = openRevenueSheetByName_PR_('Payments_Inbox');
   const hdr = getHeaders_PR_(sh);
+  const hdrNorm = hdr.map(h => String(h||'').toLowerCase().replace(/[^a-z0-9]/g,''));
+  const findCol = (keys) => {
+    const arr = Array.isArray(keys) ? keys : [keys];
+    for (const k of arr) {
+      const norm = String(k||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const idx = hdrNorm.findIndex(h => h.indexOf(norm) !== -1);
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
 
-  const cSt = idxOf_PR_(hdr,'matchstatus');
-  const cId = idxOf_PR_(hdr,'matchedbillid');
-  const cCf = idxOf_PR_(hdr,'confidence');
-  const cNt = idxOf_PR_(hdr,'notes');
+  const cSt = findCol('matchstatus');
+  const cId = findCol('matchedbillid');
+  const cCf = findCol('confidence');
+  const cNt = findCol('notes');
 
-  // new columns
-  const cOCR = idxOf_PR_(hdr,'ocr_amount');       // also accept case-insensitive match
-  const cOCR2= idxOf_PR_(hdr,'ocramount');
-  const cBA  = idxOf_PR_(hdr,'bill_amount');
-  const cBA2 = idxOf_PR_(hdr,'billamount');
-  const cDL  = idxOf_PR_(hdr,'amount_delta');
-  const cDL2 = idxOf_PR_(hdr,'delta');
-  const cBk      = idxOf_PR_(hdr,'ocr_bank');
-  const cAccCode = idxOf_PR_(hdr,'ocr_accountcode');
-  const cAccNo   = idxOf_PR_(hdr,'ocr_accountno');
+  // amount/bank columns (loose matching: underscores/spaces ignored)
+  const cOCR = findCol(['ocr_amount','ocramount']);
+  // Bill amount: prefer explicit Bill_Amount, else AmountDue as fallback
+  let cBA  = findCol(['bill_amount','billamount','bill amt','bill']);
+  if (cBA < 0) cBA = findCol(['amountdue','amount_due','amount due']);
+  // If still missing Bill_Amount, create the column at the end to guarantee write
+  if (cBA < 0) {
+    const newCol = sh.getLastColumn() + 1;
+    sh.insertColumnAfter(sh.getLastColumn());
+    sh.getRange(1, newCol).setValue('Bill_Amount');
+    cBA = newCol - 1; // zero-based
+    hdrNorm.push('billamount');
+  }
+  const cDL  = findCol(['amount_delta','delta']);
+  const cBk      = findCol('ocr_bank');
+  const cAccCode = findCol(['ocr_accountcode','ocr_acctcode','ocr_code']);
+  const cAccNo   = findCol(['ocr_accountno','ocr_acctno','ocr_accno']);
 
   // compute delta if not provided
   let _delta = delta;
@@ -1183,9 +1200,9 @@ function updateInboxMatchResult_PR_({
 
   // write amounts (any of the accepted header names)
   const setNum = (colIdx, v) => { if (colIdx>-1) sh.getRange(rowIndex, colIdx+1).setValue(v!=null? Number(v):''); };
-  setNum(cOCR>-1? cOCR : cOCR2, ocrAmount);
-  setNum(cBA >-1? cBA  : cBA2 , billAmount);
-  setNum(cDL >-1? cDL  : cDL2 , _delta);
+  setNum(cOCR, ocrAmount);
+  setNum(cBA , billAmount);
+  setNum(cDL , _delta);
 
   if (cBk>-1)      sh.getRange(rowIndex, cBk+1).setValue(ocrBank || '');
   if (cAccCode>-1) sh.getRange(rowIndex, cAccCode+1).setValue(ocrAccountCode || '');
@@ -1409,6 +1426,9 @@ function tryMatchAndConfirm_PR_(args){
   let conf      = 0.70;
   const billAccountCode = getBillAccountByRow_PR_(cand.rowIndex);
   const mergedOcrMeta   = resolveOcrMetaWithBill_(ocrMetaRaw, billAccountCode);
+  const ocrBankRaw      = ocrMetaRaw.bank || 'UNKNOWN';
+  const ocrCodeRaw      = ocrMetaRaw.code || 'NON_MATCH';
+  const ocrAccRaw       = ocrMetaRaw.acc  || 'NON_MATCH';
   const normalizedBank = normalizeBankFromCodeOrBank_PR_(billAccountCode) ||
                          normalizeBankFromCodeOrBank_PR_(mergedOcrMeta.bank) ||
                          normalizeBankFromCodeOrBank_PR_(mergedOcrMeta.code);
@@ -1429,9 +1449,9 @@ function tryMatchAndConfirm_PR_(args){
         note: `OCR amount=${ocr.amount}; bill=${billAmt}; Δ=${delta}${receiverNote}`,
         ocrAmount: Number(ocr.amount),
         billAmount: billAmt,
-        ocrBank: mergedOcrMeta.bank,
-        ocrAccountCode: mergedOcrMeta.code,
-        ocrAccountNo:   mergedOcrMeta.acc
+        ocrBank: ocrBankRaw,
+        ocrAccountCode: ocrCodeRaw,
+        ocrAccountNo:   ocrAccRaw
       });
       enqueueReview_PR_({
         room, billId:cand.billId,
@@ -1464,6 +1484,33 @@ function tryMatchAndConfirm_PR_(args){
     if (billMonth === txMonth) conf = Math.min(0.99, conf + 0.02);
   }
 
+  // Guard: missing/invalid bill amount → manual review (avoid #NUM! with blanks)
+  if (!Number.isFinite(billAmt)) {
+    updateInboxMatchResult_PR_({
+      rowIndex: inbox.rowIndex,
+      status: 'no_bill_amount',
+      matchedBillId: cand.billId || '',
+      confidence: 0.35,
+      note: 'Bill amount missing/invalid → manual review',
+      ocrAmount: declaredAmount,
+      billAmount: null,
+      ocrBank: ocrBankRaw,
+      ocrAccountCode: ocrCodeRaw,
+      ocrAccountNo:   ocrAccRaw
+    });
+    enqueueReview_PR_({
+      room,
+      billId: cand.billId,
+      declaredAmount: declaredAmount,
+      amountDue: null,
+      reason: 'no_bill_amount',
+      slipId: inbox.slipId,
+      note: 'auto-queued (no bill amount)',
+      lineUserId
+    });
+    return { ok:false, reason:'no_bill_amount' };
+  }
+
   // Guard: still no usable OCR at all → send to manual review
   const hasOcrAmount = (ocrOk && ocr && ocr.amount != null);
   if (!hasOcrAmount){
@@ -1475,9 +1522,9 @@ function tryMatchAndConfirm_PR_(args){
       note: `Missing OCR amount (${ocrSource}) → manual review${receiverNote}`,
       ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
       billAmount: billAmt,
-      ocrBank: mergedOcrMeta.bank,
-      ocrAccountCode: mergedOcrMeta.code || 'NON_MATCH',
-      ocrAccountNo:   mergedOcrMeta.acc  || 'NON_MATCH'
+      ocrBank: ocrBankRaw,
+      ocrAccountCode: ocrCodeRaw,
+      ocrAccountNo:   ocrAccRaw
     });
     enqueueReview_PR_({
       room,
@@ -1500,6 +1547,41 @@ function tryMatchAndConfirm_PR_(args){
   }
 
   // 5) Success path — mark bill, write amounts & delta
+  // If receiver bank/account mismatched → send to review instead of auto-match
+  if (bankMatchStatus !== 'receiver_matched') {
+    updateInboxMatchResult_PR_({
+      rowIndex: inbox.rowIndex,
+      status:'receiver_mismatch',
+      matchedBillId: cand.billId,
+      confidence: 0.45,
+      note: `Bank/account mismatch (${bankMatchStatus})${receiverNote}`,
+      ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
+      billAmount: billAmt,
+      ocrBank: ocrBankRaw,
+      ocrAccountCode: ocrCodeRaw,
+      ocrAccountNo:   ocrAccRaw
+    });
+    enqueueReview_PR_({
+      room,
+      billId: cand.billId,
+      declaredAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
+      amountDue: billAmt,
+      reason: 'receiver_mismatch',
+      slipId: inbox.slipId,
+      note: 'auto-queued (receiver mismatch)',
+      lineUserId
+    });
+    adminNotify_PR_([
+      '⚠️ สลิป receiver mismatch',
+      room ? `ห้อง: ${room}` : '',
+      `บิล: ${cand.billId}`,
+      `บิลธนาคาร: ${billAccountCode || '-'}`,
+      ocrBankRaw ? `ธนาคารจากสลิป: ${ocrBankRaw}` : '',
+      inbox.slipId ? `SlipID: ${inbox.slipId}` : ''
+    ].filter(Boolean).join('\n'));
+    return { ok:false, reason:'receiver_mismatch' };
+  }
+
   updateBillWithSlip_PR_({
     rowIndex: cand.rowIndex,
     slipId: inbox.slipId,
@@ -1520,9 +1602,9 @@ function tryMatchAndConfirm_PR_(args){
     note: matchNote,
     ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
     billAmount: billAmt,
-    ocrBank: mergedOcrMeta.bank,
-    ocrAccountCode: mergedOcrMeta.code,
-    ocrAccountNo:   mergedOcrMeta.acc
+    ocrBank: ocrBankRaw,
+    ocrAccountCode: ocrCodeRaw,
+    ocrAccountNo:   ocrAccRaw
     // Amount_Delta will be computed in the updater if both provided
   });
   notifyGroupPaymentMatched_PR_({
