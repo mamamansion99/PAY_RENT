@@ -707,19 +707,17 @@ function ocrSlipWithFallbacks_PR_(fileId){
   const origBlob = file.getBlob();
   const attempts = [];
   const hasAmount = (ocrObj) => !!(ocrObj && ocrObj.amount != null);
-  const pickLonger = (a,b) => {
-    const lenA = a && a.raw ? a.raw.length : 0;
-    const lenB = b && b.raw ? b.raw.length : 0;
-    return lenB > lenA ? b : a;
-  };
-  const wrap = (obj) => Object.assign({ attempts }, obj);
+  const results = [];
+  const wrap = (obj) => Object.assign({ attempts, rawText: combineOcrRawText_PR_(results) }, obj);
 
   function attempt(label, fn){
     try{
       const raw = fn() || '';
       const ocr = raw ? parseThaiSlip_PR_(raw) : null;
       attempts.push(label + (raw ? '' : ' (empty)'));
-      return { source: label, raw, ocr };
+      const result = { source: label, raw, ocr };
+      if (raw) results.push(result);
+      return result;
     }catch(e){
       attempts.push(label + ' (err)');
       console.error('OCR attempt failed', label, e);
@@ -727,26 +725,71 @@ function ocrSlipWithFallbacks_PR_(fileId){
     }
   }
 
-  let best = attempt('vision', () => visionOcrFromBlob_PR_(origBlob, 'DOCUMENT_TEXT_DETECTION'));
-  if (hasAmount(best?.ocr)) return wrap(best);
+  attempt('vision', () => visionOcrFromBlob_PR_(origBlob, 'DOCUMENT_TEXT_DETECTION'));
 
   const bigger = scaleImageForOcr_PR_(origBlob, 1.6);
   if (bigger){
-    const res = attempt('vision_scaled', () => visionOcrFromBlob_PR_(bigger, 'DOCUMENT_TEXT_DETECTION'));
-    if (hasAmount(res?.ocr)) return wrap(res);
-    best = pickLonger(best, res);
+    attempt('vision_scaled', () => visionOcrFromBlob_PR_(bigger, 'DOCUMENT_TEXT_DETECTION'));
   }
 
-  const resText = attempt('vision_text', () => visionOcrFromBlob_PR_(origBlob, 'TEXT_DETECTION'));
-  if (hasAmount(resText?.ocr)) return wrap(resText);
-  best = pickLonger(best, resText);
+  attempt('vision_text', () => visionOcrFromBlob_PR_(origBlob, 'TEXT_DETECTION'));
 
-  const resDrive = attempt('drive_ocr', () => driveOcrText_PR_(origBlob));
-  if (hasAmount(resDrive?.ocr)) return wrap(resDrive);
-  best = pickLonger(best, resDrive);
+  let best = pickBestOcrResult_PR_(results);
+  const needsDriveFallback =
+    !hasAmount(best?.ocr) ||
+    !best?.ocr?.txDate ||
+    String(best?.raw || '').length < 180;
+  if (needsDriveFallback) {
+    attempt('drive_ocr', () => driveOcrText_PR_(origBlob));
+    best = pickBestOcrResult_PR_(results);
+  }
 
   if (best) return wrap(best);
   return wrap({ source:'vision', raw:'', ocr:null });
+}
+
+function scoreOcrResult_PR_(result){
+  if (!result || !result.raw) return -1;
+  const ocr = result.ocr || {};
+  let score = Math.min(String(result.raw || '').length, 5000) / 1000;
+  if (ocr.amount != null) score += 8;
+  if (ocr.txDate) score += 4;
+  if (ocr.txTime) score += 1;
+  if (ocr.txId) score += 2;
+  if (ocr.receiverAccountNumber) score += 4;
+  if (ocr.receiverBank || ocr.bank) score += 1.5;
+  return score;
+}
+
+function pickBestOcrResult_PR_(results){
+  const list = (results || []).filter(r => r && r.raw);
+  if (!list.length) return null;
+  return list.slice().sort((a,b) => {
+    const scoreDiff = scoreOcrResult_PR_(b) - scoreOcrResult_PR_(a);
+    if (scoreDiff !== 0) return scoreDiff;
+    return String(b.raw || '').length - String(a.raw || '').length;
+  })[0];
+}
+
+function limitCellText_PR_(text, maxLen){
+  const s = String(text || '');
+  const n = maxLen || 45000;
+  if (s.length <= n) return s;
+  return s.slice(0, n - 80) + '\n...[truncated for Google Sheets cell limit]';
+}
+
+function combineOcrRawText_PR_(results){
+  const seen = {};
+  const parts = [];
+  (results || []).forEach(r => {
+    const raw = String(r && r.raw || '').trim();
+    if (!raw) return;
+    const key = raw.replace(/\s+/g, ' ').slice(0, 500);
+    if (seen[key]) return;
+    seen[key] = true;
+    parts.push(`--- ${r.source || 'ocr'} ---\n${raw}`);
+  });
+  return limitCellText_PR_(parts.join('\n\n'), 45000);
 }
 
 const TH_MONTHS_PR = {'ม.ค.':1,'มกราคม':1,'ก.พ.':2,'กุมภาพันธ์':2,'มี.ค.':3,'มีนาคม':3,'เม.ย.':4,'เมษายน':4,'พ.ค.':5,'พฤษภาคม':5,'มิ.ย.':6,'มิถุนายน':6,'ก.ค.':7,'กรกฎาคม':7,'ส.ค.':8,'สิงหาคม':8,'ก.ย.':9,'กันยายน':9,'ต.ค.':10,'ตุลาคม':10,'พ.ย.':11,'พฤศจิกายน':11,'ธ.ค.':12,'ธันวาคม':12};
@@ -1149,7 +1192,8 @@ function updateInboxMatchResult_PR_({
   delta,
   ocrBank,
   ocrAccountCode,
-  ocrAccountNo
+  ocrAccountNo,
+  ocrRawText
 }){
   const sh  = openRevenueSheetByName_PR_('Payments_Inbox');
   const hdr = getHeaders_PR_(sh);
@@ -1186,6 +1230,13 @@ function updateInboxMatchResult_PR_({
   const cBk      = findCol('ocr_bank');
   const cAccCode = findCol(['ocr_accountcode','ocr_acctcode','ocr_code']);
   const cAccNo   = findCol(['ocr_accountno','ocr_acctno','ocr_accno']);
+  let cRaw        = findCol(['ocr_rawtext','ocrrawtext','raw_ocr','rawocr','ocr_text','ocrtext']);
+  if (ocrRawText !== undefined && cRaw < 0) {
+    const newCol = sh.getLastColumn() + 1;
+    sh.insertColumnAfter(sh.getLastColumn());
+    sh.getRange(1, newCol).setValue('OCR_RawText');
+    cRaw = newCol - 1;
+  }
 
   // compute delta if not provided
   let _delta = delta;
@@ -1207,6 +1258,7 @@ function updateInboxMatchResult_PR_({
   if (cBk>-1)      sh.getRange(rowIndex, cBk+1).setValue(ocrBank || '');
   if (cAccCode>-1) sh.getRange(rowIndex, cAccCode+1).setValue(ocrAccountCode || '');
   if (cAccNo>-1)   sh.getRange(rowIndex, cAccNo+1).setValue(ocrAccountNo || '');
+  if (cRaw>-1 && ocrRawText !== undefined) sh.getRange(rowIndex, cRaw+1).setValue(limitCellText_PR_(ocrRawText, 45000));
 }
 
 
@@ -1356,7 +1408,7 @@ function tryMatchAndConfirm_PR_(args){
   });
 
   // 2) OCR
-  let ocr = null, ocrOk = false, ocrSource = 'vision';
+  let ocr = null, ocrOk = false, ocrSource = 'vision', ocrRawText = '';
   const ocrMeta = () => {
     if (!ocr) return { bank:'UNKNOWN', code:'NON_MATCH', acc:'NON_MATCH' };
     const bank = ocr.receiverBank || ocr.bank || 'UNKNOWN';
@@ -1375,6 +1427,7 @@ function tryMatchAndConfirm_PR_(args){
       const ocrResult = ocrSlipWithFallbacks_PR_(fileId);
       ocr = ocrResult ? ocrResult.ocr : null;
       ocr = normalizeOcrDateForBillMonth_PR_(ocr, ym);
+      ocrRawText = ocrResult ? (ocrResult.rawText || ocrResult.raw || '') : '';
       ocrSource = ocrResult ? (ocrResult.source || 'vision') : 'vision';
       const ocrPassTrail = (ocrResult && ocrResult.attempts && ocrResult.attempts.length)
         ? ` [${ocrResult.attempts.join(' -> ')}]`
@@ -1391,7 +1444,8 @@ function tryMatchAndConfirm_PR_(args){
         ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
         ocrBank: ocrMeta().bank,
         ocrAccountCode: ocrMeta().code,
-        ocrAccountNo:   ocrMeta().acc
+        ocrAccountNo:   ocrMeta().acc,
+        ocrRawText
       });
 
     }catch(e){
