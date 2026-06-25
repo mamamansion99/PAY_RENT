@@ -1285,6 +1285,64 @@ function resolveOcrMetaWithBill_(ocrMetaObj, billAccountCode){
   };
 }
 
+function isValidDate_PR_(d){
+  return d instanceof Date && !isNaN(d.getTime());
+}
+
+function makeDateFromBillMonth_PR_(billYm, day){
+  const m = String(billYm || '').match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const dd = Number(day);
+  if (!y || mo < 1 || mo > 12 || dd < 1 || dd > 31) return null;
+  const d = new Date(y, mo - 1, dd);
+  if (d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== dd) return null;
+  return d;
+}
+
+function normalizeOcrDateForBillMonth_PR_(ocr, billYm){
+  if (!ocr || !billYm || !/^\d{4}-\d{2}$/.test(String(billYm))) return ocr;
+  const billDate = ymToDate_(billYm);
+  const billYear = billDate.getFullYear();
+  const billMonth = billDate.getMonth();
+
+  if (isValidDate_PR_(ocr.txDate)) {
+    const txYear = ocr.txDate.getFullYear();
+    const txMonth = ocr.txDate.getMonth();
+    const txDay = ocr.txDate.getDate();
+
+    // Vision can misread one digit in the Buddhist year. If month/day are
+    // usable, anchor the year to the selected bill cycle instead of trusting
+    // one noisy OCR digit.
+    if (txMonth === billMonth && txYear !== billYear && Math.abs(txYear - billYear) <= 2) {
+      const corrected = new Date(billYear, txMonth, txDay);
+      if (isValidDate_PR_(corrected)) {
+        return Object.assign({}, ocr, {
+          txDate: corrected,
+          txDateOcrOriginal: Utilities.formatDate(ocr.txDate, 'Asia/Bangkok', 'yyyy-MM-dd'),
+          txDateCorrection: `year corrected to ${billYear} from selected bill month ${billYm}`
+        });
+      }
+    }
+    return ocr;
+  }
+
+  // If OCR mangles the Thai month text but still captures "day ... year - time",
+  // recover only the day and use the selected bill month for month/year.
+  const raw = String(ocr.rawText || '');
+  const m = raw.match(/\b([0-3]?\d)(?![,\d])[\s\S]{1,16}?((?:25|20)\d{2})\s*[-–]\s*([01]?\d|2[0-3])[:.]([0-5]\d)\b/);
+  if (!m) return ocr;
+  const recovered = makeDateFromBillMonth_PR_(billYm, m[1]);
+  if (!recovered) return ocr;
+  return Object.assign({}, ocr, {
+    txDate: recovered,
+    txTime: `${String(m[3]).padStart(2, '0')}:${m[4]}`,
+    txDateOcrOriginal: m[0],
+    txDateCorrection: `date recovered from selected bill month ${billYm}`
+  });
+}
+
 function tryMatchAndConfirm_PR_(args){
   const ym         = String(args.ym || '').trim();
   const room       = (args.room || '').toUpperCase().trim();
@@ -1316,10 +1374,12 @@ function tryMatchAndConfirm_PR_(args){
     try{
       const ocrResult = ocrSlipWithFallbacks_PR_(fileId);
       ocr = ocrResult ? ocrResult.ocr : null;
+      ocr = normalizeOcrDateForBillMonth_PR_(ocr, ym);
       ocrSource = ocrResult ? (ocrResult.source || 'vision') : 'vision';
       const ocrPassTrail = (ocrResult && ocrResult.attempts && ocrResult.attempts.length)
         ? ` [${ocrResult.attempts.join(' -> ')}]`
         : '';
+      const ocrDateNote = ocr?.txDateCorrection ? ` (${ocr.txDateCorrection})` : '';
       ocrOk = !!(ocr && (ocr.amount!=null || ocr.txDate || ocr.txId || ocr.bank));
 
       updateInboxMatchResult_PR_({
@@ -1327,7 +1387,7 @@ function tryMatchAndConfirm_PR_(args){
         status: 'pending_ocr',
         matchedBillId: '',
         confidence: '',
-        note: `OCR(${ocrSource}): amount=${ocr?.amount ?? ''}, date=${ocr?.txDate? Utilities.formatDate(ocr.txDate,'Asia/Bangkok','yyyy-MM-dd') : ''}, bank=${ocr?.bank ?? ''}, ref=${ocr?.txId ?? ''}${ocrPassTrail}`,
+        note: `OCR(${ocrSource}): amount=${ocr?.amount ?? ''}, date=${ocr?.txDate? Utilities.formatDate(ocr.txDate,'Asia/Bangkok','yyyy-MM-dd') : ''}${ocrDateNote}, bank=${ocr?.bank ?? ''}, ref=${ocr?.txId ?? ''}${ocrPassTrail}`,
         ocrAmount: (ocr && ocr.amount!=null)? Number(ocr.amount): null,
         ocrBank: ocrMeta().bank,
         ocrAccountCode: ocrMeta().code,
@@ -1591,7 +1651,7 @@ function tryMatchAndConfirm_PR_(args){
   });
 
   const matchNote = ocrOk
-    ? `OCR OK; bank=${ocr.bank||''}; ref=${ocr.txId||''}${receiverNote}`
+    ? `OCR OK; bank=${ocr.bank||''}; ref=${ocr.txId||''}${ocr?.txDateCorrection ? '; ' + ocr.txDateCorrection : ''}${receiverNote}`
     : `Matched using selected month (no OCR data)${receiverNote}`;
 
   updateInboxMatchResult_PR_({
