@@ -134,7 +134,10 @@ const RECEIVER_ACCOUNTS = {
   '5111482754':  { code: 'KGSI', bank: 'BAY',   label: 'Krungsri ชั้น 3' },
 
   // GSB – ชั้น 4–5
-  '050711087200': { code: 'GSB', bank: 'GSB',  label: 'GSB ชั้น 4–5' },
+  '050711087200': { code: 'GSB', bank: 'GSB',  label: 'GSB ชั้น 5' },
+
+  // GSB – ชั้น 4–5
+  '7602351442': { code: 'TTB', bank: 'TTB',  label: 'TTB ชั้น 4' },
 
   // Additional account mapping
   '1818203205': { code: 'KBIZ', bank: 'KBIZ', label: 'KBIZ' }
@@ -143,12 +146,48 @@ const RECEIVER_ACCOUNTS = {
 /***** ENTRYPOINT *****/
 function doPost(e){
   const headers = e?.headers || {};
-  const body = JSON.parse(e?.postData?.contents || '{}');
-  const provided = headers['X-Worker-Secret'] || headers['x-worker-secret'] || body.workerSecret || '';
+  const params = e?.parameter || {};
+  let body = {};
+  try{
+    body = JSON.parse(e?.postData?.contents || '{}');
+  }catch(err){
+    body = {};
+  }
+  const provided = headers['X-Worker-Secret'] ||
+    headers['x-worker-secret'] ||
+    body.workerSecret ||
+    params.workerSecret ||
+    params.worker_secret ||
+    '';
   if (provided !== WORKER_SECRET) {
     return ContentService.createTextOutput(JSON.stringify({ ok:false, error:'forbidden' }))
       .setMimeType(ContentService.MimeType.JSON);
   }
+
+  // Direct OCR trigger (e.g., from n8n)
+  if (body && body.action === 'ocr') {
+    const fileId = body.fileId || body.file_id || body.id || '';
+    const room = body.room || '';
+    const ym = body.ym || '';
+    const lineUserId = body.lineUserId || body.line_user_id || '';
+    const slipUrl = body.slipUrl || (fileId ? `https://drive.google.com/uc?export=view&id=${fileId}` : '');
+    if (!fileId) {
+      return ContentService.createTextOutput(JSON.stringify({ ok:false, error:'missing_fileId' }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    try{
+      const result = tryMatchAndConfirm_PR_({ room, ym, lineUserId, fileId, slipUrl });
+      return ContentService.createTextOutput(JSON.stringify(result))
+        .setMimeType(ContentService.MimeType.JSON);
+    }catch(err){
+      return ContentService.createTextOutput(JSON.stringify({
+        ok:false,
+        error:'ocr_failed',
+        message:String(err)
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
   const events = Array.isArray(body.events) ? body.events : [];
   events.forEach(ev=>{
     try{
